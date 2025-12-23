@@ -519,8 +519,9 @@ class ChipDesigner:
         # Sign multiplier for direction-dependent calculations (+1 for top, -1 for bottom)
         sign = 1 if is_top else -1
         
-        # Arc angle range for pad placement (hardcoded 30 degrees)
-        total_arc_angle = math.radians(30)
+        # Arc angle range for pad placement (from config, default 30 degrees)
+        dc_pad_arc_angle_deg = getattr(config, 'dc_pad_arc_angle', 30.0)
+        total_arc_angle = math.radians(dc_pad_arc_angle_deg)
         
         # Center angle: 90 degrees (top) or 270 degrees (bottom)
         center_angle = math.pi / 2 if is_top else 3 * math.pi / 2
@@ -558,7 +559,7 @@ class ChipDesigner:
             trace_final_x = chip_center_x - config.dc_pad_entrance_width / 2.0 + entrance_spacing * (trace_index + 1)
             
             # Ground plane taper geometry (for reference):
-            # - Wide end at dc_box_inner_y with width dc_cutout_width
+            # - Wide end at dc_box_inner_y with width computed from dc_pad_arc_angle
             # - Narrow end at taper_end_y with width dc_pad_entrance_width
             # - Height = dc_pad_entrance_height
             dc_cutout_center_y = chip_center_y + y_offset
@@ -567,8 +568,16 @@ class ChipDesigner:
             taper_start_y = pad_y - sign * config.dc_pad_height / 2.0
             taper_end_y = taper_start_y - sign * config.dc_trace_taper_length
             
-            # Ground plane taper boundaries
-            gp_taper_top_y = dc_cutout_center_y - sign * config.dc_cutout_height / 2.0
+            # Ground plane taper boundaries - computed from arc geometry
+            # The taper starts at the innermost pad edge (plus clearance), not the cutout box edge
+            dc_pad_arc_angle_deg = getattr(config, 'dc_pad_arc_angle', 30.0)
+            half_arc_angle_rad = math.radians(dc_pad_arc_angle_deg / 2.0)
+            pad_vertical_extent = config.dc_pad_arc_radius * math.cos(half_arc_angle_rad)
+            
+            if is_top:
+                gp_taper_top_y = chip_center_y + pad_vertical_extent - config.dc_pad_height / 2.0 - config.dc_pad_clearance
+            else:
+                gp_taper_top_y = chip_center_y - pad_vertical_extent + config.dc_pad_height / 2.0 + config.dc_pad_clearance
             gp_taper_bottom_y = gp_taper_top_y - sign * config.dc_pad_entrance_height
             
             # Trace ends at aperture edge (vertical section)
@@ -578,25 +587,32 @@ class ChipDesigner:
             aperture_penetration = getattr(config, 'dc_trace_aperture_penetration', 0)
             fanout_arc_radius = getattr(config, 'dc_trace_fanout_arc_radius', 200.0)
             
+            # Angled trace width is 3x the typical trace width
+            angled_trace_width = config.dc_trace_width * 3.0
+            
             # Create taper polygon (trapezoid) - stays centered on pad_x
-            # Vertices are the same for both top and bottom (just different y values)
+            # Tapers from pad width to the angled trace width
             taper_vertices = [
                 # Wide end (at pad)
                 pya.Point(self._um_to_dbu(pad_x - config.dc_pad_width / 2.0),
                          self._um_to_dbu(taper_start_y)),
                 pya.Point(self._um_to_dbu(pad_x + config.dc_pad_width / 2.0),
                          self._um_to_dbu(taper_start_y)),
-                # Narrow end
-                pya.Point(self._um_to_dbu(pad_x + config.dc_trace_width / 2.0),
+                # Narrow end (to angled trace width)
+                pya.Point(self._um_to_dbu(pad_x + angled_trace_width / 2.0),
                          self._um_to_dbu(taper_end_y)),
-                pya.Point(self._um_to_dbu(pad_x - config.dc_trace_width / 2.0),
+                pya.Point(self._um_to_dbu(pad_x - angled_trace_width / 2.0),
                          self._um_to_dbu(taper_end_y)),
             ]
             taper_polygon = pya.Polygon(taper_vertices)
             cell.shapes(dc_layer_idx).insert(taper_polygon)
             
             # Calculate the angle of the ground plane taper
-            gp_width_change = (config.dc_cutout_width - config.dc_pad_entrance_width) / 2.0
+            # Width is computed dynamically based on DC pad arc angle
+            pad_horizontal_extent = config.dc_pad_arc_radius * math.sin(half_arc_angle_rad)
+            cutout_width = 2.0 * (pad_horizontal_extent + config.dc_pad_width / 2.0 + config.dc_pad_clearance)
+            
+            gp_width_change = (cutout_width - config.dc_pad_entrance_width) / 2.0
             gp_height = config.dc_pad_entrance_height
             
             # How far does this trace need to move horizontally?
@@ -612,25 +628,89 @@ class ChipDesigner:
             else:
                 angled_end_y = min(angled_end_y, gp_taper_bottom_y)
             
+            # Angled trace width is 3x the typical trace width
+            angled_trace_width = config.dc_trace_width * 3.0
+            
+            # Determine which side is "outer" (away from chip center)
+            # Extra width extends only outward to maintain inner edge alignment
+            is_left_of_center = trace_final_x < chip_center_x
+            
+            # At the end, inner edge should be at same position as vertical trace inner edge
+            # Vertical trace inner edge: trace_final_x + dc_trace_width/2 (left) or trace_final_x - dc_trace_width/2 (right)
+            if is_left_of_center:
+                # Inner edge is on right (+x), outer edge on left (-x)
+                angled_end_inner_x = trace_final_x + config.dc_trace_width / 2.0
+                angled_end_outer_x = angled_end_inner_x - angled_trace_width
+            else:
+                # Inner edge is on left (-x), outer edge on right (+x)
+                angled_end_inner_x = trace_final_x - config.dc_trace_width / 2.0
+                angled_end_outer_x = angled_end_inner_x + angled_trace_width
+            
             # Create angled trace section (parallelogram)
             angled_vertices = [
                 # Start at taper end (centered on pad_x)
-                pya.Point(self._um_to_dbu(pad_x - config.dc_trace_width / 2.0),
+                pya.Point(self._um_to_dbu(pad_x - angled_trace_width / 2.0),
                          self._um_to_dbu(taper_end_y)),
-                pya.Point(self._um_to_dbu(pad_x + config.dc_trace_width / 2.0),
+                pya.Point(self._um_to_dbu(pad_x + angled_trace_width / 2.0),
                          self._um_to_dbu(taper_end_y)),
-                # End at angled_end_y (centered on trace_final_x)
-                pya.Point(self._um_to_dbu(trace_final_x + config.dc_trace_width / 2.0),
+                # End at angled_end_y (inner edge aligned with vertical trace)
+                pya.Point(self._um_to_dbu(max(angled_end_inner_x, angled_end_outer_x)),
                          self._um_to_dbu(angled_end_y)),
-                pya.Point(self._um_to_dbu(trace_final_x - config.dc_trace_width / 2.0),
+                pya.Point(self._um_to_dbu(min(angled_end_inner_x, angled_end_outer_x)),
                          self._um_to_dbu(angled_end_y)),
             ]
             angled_polygon = pya.Polygon(angled_vertices)
             cell.shapes(dc_layer_idx).insert(angled_polygon)
             
-            # Create vertical trace section from angled_end to aperture radius
+            # Create taper from angled trace width to vertical trace width
+            # Taper only on the OUTER edge to maintain gap between traces
+            # Taper length is proportional to width change for smooth transition
+            width_taper_length = (angled_trace_width - config.dc_trace_width) * 2.0
+            
+            if is_top:
+                width_taper_start_y = angled_end_y
+                width_taper_end_y = angled_end_y - width_taper_length
+            else:
+                width_taper_start_y = angled_end_y
+                width_taper_end_y = angled_end_y + width_taper_length
+            
+            # Use the same edge positions calculated for the angled trace
+            # Inner edge stays constant, outer edge tapers in
+            if is_left_of_center:
+                # Keep right edge (inner) constant, taper left edge (outer)
+                inner_edge_x = angled_end_inner_x
+                wide_outer_x = angled_end_outer_x
+                narrow_outer_x = trace_final_x - config.dc_trace_width / 2.0
+                
+                width_taper_vertices = [
+                    # Wide end (at angled section end)
+                    pya.Point(self._um_to_dbu(wide_outer_x), self._um_to_dbu(width_taper_start_y)),
+                    pya.Point(self._um_to_dbu(inner_edge_x), self._um_to_dbu(width_taper_start_y)),
+                    # Narrow end (inner edge stays same, outer edge tapers in)
+                    pya.Point(self._um_to_dbu(inner_edge_x), self._um_to_dbu(width_taper_end_y)),
+                    pya.Point(self._um_to_dbu(narrow_outer_x), self._um_to_dbu(width_taper_end_y)),
+                ]
+            else:
+                # Keep left edge (inner) constant, taper right edge (outer)
+                inner_edge_x = angled_end_inner_x
+                wide_outer_x = angled_end_outer_x
+                narrow_outer_x = trace_final_x + config.dc_trace_width / 2.0
+                
+                width_taper_vertices = [
+                    # Wide end (at angled section end)
+                    pya.Point(self._um_to_dbu(inner_edge_x), self._um_to_dbu(width_taper_start_y)),
+                    pya.Point(self._um_to_dbu(wide_outer_x), self._um_to_dbu(width_taper_start_y)),
+                    # Narrow end (inner edge stays same, outer edge tapers in)
+                    pya.Point(self._um_to_dbu(narrow_outer_x), self._um_to_dbu(width_taper_end_y)),
+                    pya.Point(self._um_to_dbu(inner_edge_x), self._um_to_dbu(width_taper_end_y)),
+                ]
+            
+            width_taper_polygon = pya.Polygon(width_taper_vertices)
+            cell.shapes(dc_layer_idx).insert(width_taper_polygon)
+            
+            # Create vertical trace section from width taper end to aperture radius
             # Box constructor needs (min_x, min_y, max_x, max_y)
-            vert_y1, vert_y2 = (trace_end_y, angled_end_y) if is_top else (angled_end_y, trace_end_y)
+            vert_y1, vert_y2 = (trace_end_y, width_taper_end_y) if is_top else (width_taper_end_y, trace_end_y)
             vertical_box = pya.Box(
                 self._um_to_dbu(trace_final_x - config.dc_trace_width / 2.0),
                 self._um_to_dbu(min(vert_y1, vert_y2)),
@@ -680,6 +760,10 @@ class ChipDesigner:
         """
         Create rectangular cutout region for DC pad array.
         
+        The cutout width and inner edge position are computed dynamically based 
+        on the DC pad arc angle to ensure all pads are encompassed regardless 
+        of their angular spread, and to connect seamlessly with the entrance taper.
+        
         Args:
             y_offset: vertical offset from chip center (positive = above, negative = below)
             config: design configuration
@@ -693,14 +777,38 @@ class ChipDesigner:
         chip_center_x = config.chip_width / 2.0
         chip_center_y = config.chip_height / 2.0
         
-        # Cutout centered horizontally, offset vertically
-        cutout_center_y = chip_center_y + y_offset
+        is_top = y_offset > 0
+        
+        # Calculate cutout width based on arc geometry
+        # The outermost pads are at angle = center_angle ± (arc_angle/2)
+        # Their horizontal extent from center is: arc_radius * sin(arc_angle/2)
+        dc_pad_arc_angle_deg = getattr(config, 'dc_pad_arc_angle', 30.0)
+        half_arc_angle_rad = math.radians(dc_pad_arc_angle_deg / 2.0)
+        
+        # Horizontal distance from center to outermost pad center
+        pad_horizontal_extent = config.dc_pad_arc_radius * math.sin(half_arc_angle_rad)
+        
+        # Total cutout width: 2x (pad extent + half pad width + clearance)
+        cutout_width = 2.0 * (pad_horizontal_extent + config.dc_pad_width / 2.0 + config.dc_pad_clearance)
+        
+        # Vertical extent: from chip edge (with clearance) to innermost pad edge
+        # The innermost pad edge is determined by the arc geometry
+        pad_vertical_extent = config.dc_pad_arc_radius * math.cos(half_arc_angle_rad)
+        
+        # Inner edge (toward chip center) - must match taper start position
+        if is_top:
+            inner_edge_y = chip_center_y + pad_vertical_extent - config.dc_pad_height / 2.0 - config.dc_pad_clearance
+            # Outer edge extends to chip edge area (use old formula for outer extent)
+            outer_edge_y = chip_center_y + y_offset + config.dc_cutout_height / 2.0
+        else:
+            inner_edge_y = chip_center_y - pad_vertical_extent + config.dc_pad_height / 2.0 + config.dc_pad_clearance
+            outer_edge_y = chip_center_y + y_offset - config.dc_cutout_height / 2.0
         
         cutout_box = pya.Box(
-            self._um_to_dbu(chip_center_x - config.dc_cutout_width / 2.0),
-            self._um_to_dbu(cutout_center_y - config.dc_cutout_height / 2.0),
-            self._um_to_dbu(chip_center_x + config.dc_cutout_width / 2.0),
-            self._um_to_dbu(cutout_center_y + config.dc_cutout_height / 2.0)
+            self._um_to_dbu(chip_center_x - cutout_width / 2.0),
+            self._um_to_dbu(min(inner_edge_y, outer_edge_y)),
+            self._um_to_dbu(chip_center_x + cutout_width / 2.0),
+            self._um_to_dbu(max(inner_edge_y, outer_edge_y))
         )
         
         return pya.Region(cutout_box)
@@ -710,9 +818,12 @@ class ChipDesigner:
         Create tapered entrance cutout from DC pad box to aperture.
         
         Consists of two parts:
-        1. Tapered section: from dc_cutout_width at DC pad box inner edge 
-           down to dc_pad_entrance_width, height = dc_pad_entrance_height
+        1. Tapered section: from dynamically calculated cutout width at the innermost
+           pad edge (plus clearance) down to dc_pad_entrance_width
         2. Rectangular channel: from taper end through aperture circle
+        
+        The wide end width and Y position are computed from the DC pad arc geometry
+        to ensure the taper clears all bond pads.
         
         Args:
             y_offset: vertical offset from chip center (positive = above, negative = below)
@@ -728,33 +839,52 @@ class ChipDesigner:
         chip_center_y = config.chip_height / 2.0
         
         is_top = y_offset > 0
+        sign = 1 if is_top else -1
         
-        # DC cutout box inner edge (the edge closest to center)
-        dc_cutout_center_y = chip_center_y + y_offset
+        # Calculate wide width based on arc geometry (same as create_dc_cutout_region)
+        dc_pad_arc_angle_deg = getattr(config, 'dc_pad_arc_angle', 30.0)
+        half_arc_angle_rad = math.radians(dc_pad_arc_angle_deg / 2.0)
+        pad_horizontal_extent = config.dc_pad_arc_radius * math.sin(half_arc_angle_rad)
+        wide_width = 2.0 * (pad_horizontal_extent + config.dc_pad_width / 2.0 + config.dc_pad_clearance)
+        
+        # Calculate taper start Y position based on innermost pad edge
+        # The outermost pads (at half_arc_angle from center) are at:
+        # pad_y = chip_center_y + dc_pad_arc_radius * sin(center_angle + half_arc_angle)
+        # For top: center_angle = 90°, so the outermost pads are at lower Y
+        # For bottom: center_angle = 270°, so the outermost pads are at higher Y
+        #
+        # The innermost Y position of all pads (closest to chip center) is:
+        # min_pad_y (top) = chip_center_y + dc_pad_arc_radius * cos(half_arc_angle) - dc_pad_height/2
+        # max_pad_y (bottom) = chip_center_y - dc_pad_arc_radius * cos(half_arc_angle) + dc_pad_height/2
+        #
+        # Note: For angle from vertical (90°), we use cos for the vertical component
+        pad_vertical_extent = config.dc_pad_arc_radius * math.cos(half_arc_angle_rad)
+        
         if is_top:
-            dc_box_inner_y = dc_cutout_center_y - config.dc_cutout_height / 2.0
+            # Taper starts below the innermost pad edge with clearance
+            taper_wide_y = chip_center_y + pad_vertical_extent - config.dc_pad_height / 2.0 - config.dc_pad_clearance
         else:
-            dc_box_inner_y = dc_cutout_center_y + config.dc_cutout_height / 2.0
+            # Taper starts above the innermost pad edge with clearance
+            taper_wide_y = chip_center_y - pad_vertical_extent + config.dc_pad_height / 2.0 + config.dc_pad_clearance
         
         # Taper dimensions
         taper_height = config.dc_pad_entrance_height  # Height of tapered section
-        wide_width = config.dc_cutout_width
         narrow_width = config.dc_pad_entrance_width
         
         # Taper end position (toward center)
         if is_top:
-            taper_end_y = dc_box_inner_y - taper_height
+            taper_end_y = taper_wide_y - taper_height
         else:
-            taper_end_y = dc_box_inner_y + taper_height
+            taper_end_y = taper_wide_y + taper_height
         
         # Create tapered polygon (trapezoid)
         if is_top:
             taper_vertices = [
-                # Wide end (at DC box)
+                # Wide end (at innermost pad edge with clearance)
                 pya.Point(self._um_to_dbu(chip_center_x - wide_width / 2.0),
-                         self._um_to_dbu(dc_box_inner_y)),
+                         self._um_to_dbu(taper_wide_y)),
                 pya.Point(self._um_to_dbu(chip_center_x + wide_width / 2.0),
-                         self._um_to_dbu(dc_box_inner_y)),
+                         self._um_to_dbu(taper_wide_y)),
                 # Narrow end (toward center)
                 pya.Point(self._um_to_dbu(chip_center_x + narrow_width / 2.0),
                          self._um_to_dbu(taper_end_y)),
@@ -763,11 +893,11 @@ class ChipDesigner:
             ]
         else:
             taper_vertices = [
-                # Wide end (at DC box)
+                # Wide end (at innermost pad edge with clearance)
                 pya.Point(self._um_to_dbu(chip_center_x - wide_width / 2.0),
-                         self._um_to_dbu(dc_box_inner_y)),
+                         self._um_to_dbu(taper_wide_y)),
                 pya.Point(self._um_to_dbu(chip_center_x + wide_width / 2.0),
-                         self._um_to_dbu(dc_box_inner_y)),
+                         self._um_to_dbu(taper_wide_y)),
                 # Narrow end (toward center)
                 pya.Point(self._um_to_dbu(chip_center_x + narrow_width / 2.0),
                          self._um_to_dbu(taper_end_y)),
