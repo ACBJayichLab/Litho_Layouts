@@ -1603,7 +1603,7 @@ class ChipDesigner:
         
         return chip_cell
     
-    def generate_design(self, output_dir="output"):
+    def generate_design(self, output_dir=None):
         """
         Generate complete design and export to GDS files.
         
@@ -1612,9 +1612,11 @@ class ChipDesigner:
         - _prod.gds: flattened (all geometry merged, ready for fabrication)
         
         Args:
-            output_dir: directory for output files
+            output_dir: directory for output files (default: script_location/output)
         """
-        # Create output directory if needed
+        # Create output directory if needed (relative to script location)
+        if output_dir is None:
+            output_dir = Path(__file__).parent / "output"
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         
         # Get the current script filename (without extension)

@@ -1287,17 +1287,19 @@ class MaskDesigner:
         with open(filepath, 'w') as f:
             f.write(map_content)
 
-    def generate_design(self, output_dir="output"):
+    def generate_design(self, output_dir=None):
         """
         Generate complete mask design and export to GDS files.
         
         Args:
-            output_dir: Directory for output files
+            output_dir: Directory for output files (default: script_location/output)
         
         Returns:
             Tuple of (inspect_path, prod_path)
         """
-        # Create output directory if needed
+        # Create output directory if needed (relative to script location)
+        if output_dir is None:
+            output_dir = Path(__file__).parent / "output"
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         
         # Get the current script filename (without extension)
