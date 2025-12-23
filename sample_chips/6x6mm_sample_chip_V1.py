@@ -29,8 +29,8 @@ class DesignConfig:
     dbu = 0.01  # 1 DBU = 10 nm
     
     # Layer definitions
-    METAL_LAYER = pya.LayerInfo(1, 0)  # Metal/conductor layer (mw_metal)
-    DC_PAD_LAYER = pya.LayerInfo(3, 0)  # DC pads and traces layer (dc_pads)
+    METAL_LAYER = pya.LayerInfo(1, 0)  # Metal/conductor layer (CPW 1/0)
+    DC_PAD_LAYER = pya.LayerInfo(3, 0)  # DC pads and traces layer (dc_contacts 3/0)
     
     # Chip dimensions (includes 200 µm edge buffer)
     chip_width = 6000.0      # 6 mm total width
@@ -246,6 +246,9 @@ class ChipDesigner:
         """
         Create an alignment cross (+ shape) at specified position.
         
+        Also creates DC pad layer extension rectangles at the ends of each arm
+        to enable alignment between the two layers.
+        
         Args:
             cell: KLayout cell to insert cross into
             x_center: x-coordinate of cross center (µm)
@@ -257,8 +260,10 @@ class ChipDesigner:
         
         size = config.cross_size
         lw = config.cross_linewidth
+        clearance = config.cross_clearance
+        extension = clearance / 2.0  # DC layer extension beyond metal layer
         
-        # Horizontal bar
+        # Horizontal bar (metal layer)
         h_bar = pya.Box(
             self._um_to_dbu(x_center - size / 2.0),
             self._um_to_dbu(y_center - lw / 2.0),
@@ -267,7 +272,7 @@ class ChipDesigner:
         )
         cell.shapes(self.layout.layer(config.METAL_LAYER)).insert(h_bar)
         
-        # Vertical bar
+        # Vertical bar (metal layer)
         v_bar = pya.Box(
             self._um_to_dbu(x_center - lw / 2.0),
             self._um_to_dbu(y_center - size / 2.0),
@@ -275,6 +280,45 @@ class ChipDesigner:
             self._um_to_dbu(y_center + size / 2.0)
         )
         cell.shapes(self.layout.layer(config.METAL_LAYER)).insert(v_bar)
+        
+        # DC pad layer extensions at ends of each arm (for layer alignment)
+        dc_layer_idx = self.layout.layer(config.DC_PAD_LAYER)
+        
+        # Left extension (extends left from left end of horizontal bar)
+        left_ext = pya.Box(
+            self._um_to_dbu(x_center - size / 2.0 - extension),
+            self._um_to_dbu(y_center - lw / 2.0),
+            self._um_to_dbu(x_center - size / 2.0),
+            self._um_to_dbu(y_center + lw / 2.0)
+        )
+        cell.shapes(dc_layer_idx).insert(left_ext)
+        
+        # Right extension (extends right from right end of horizontal bar)
+        right_ext = pya.Box(
+            self._um_to_dbu(x_center + size / 2.0),
+            self._um_to_dbu(y_center - lw / 2.0),
+            self._um_to_dbu(x_center + size / 2.0 + extension),
+            self._um_to_dbu(y_center + lw / 2.0)
+        )
+        cell.shapes(dc_layer_idx).insert(right_ext)
+        
+        # Bottom extension (extends down from bottom of vertical bar)
+        bottom_ext = pya.Box(
+            self._um_to_dbu(x_center - lw / 2.0),
+            self._um_to_dbu(y_center - size / 2.0 - extension),
+            self._um_to_dbu(x_center + lw / 2.0),
+            self._um_to_dbu(y_center - size / 2.0)
+        )
+        cell.shapes(dc_layer_idx).insert(bottom_ext)
+        
+        # Top extension (extends up from top of vertical bar)
+        top_ext = pya.Box(
+            self._um_to_dbu(x_center - lw / 2.0),
+            self._um_to_dbu(y_center + size / 2.0),
+            self._um_to_dbu(x_center + lw / 2.0),
+            self._um_to_dbu(y_center + size / 2.0 + extension)
+        )
+        cell.shapes(dc_layer_idx).insert(top_ext)
     
     def create_alignment_cross_clearance(self, x_center, y_center, edge_length, config=None):
         """
