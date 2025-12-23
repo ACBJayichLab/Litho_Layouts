@@ -73,7 +73,8 @@ class DesignConfig:
     dc_trace_width = 10.0            # Width of DC traces after taper (µm)
     dc_trace_taper_length = 80.0     # Length of taper from pad to trace (µm)
     dc_trace_aperture_penetration = 100.0  # How far DC traces extend into aperture (µm)
-    dc_trace_fanout_width = 300.0    # Total width of fanned-out traces at aperture center (µm)
+    dc_trace_fanout_arc_radius = 200.0  # Radius of arc for trace fanout inside aperture (µm)
+    dc_trace_fanout_arc_angle = 30.0   # Total angular spread for trace fanout (degrees)
     dc_aperture_triangle_base = 200.0  # Length along circle edge for triangular cutout (µm)
     dc_aperture_triangle_height = 150.0  # Depth of triangular cutout into aperture (µm)
     
@@ -131,21 +132,40 @@ class ChipDesigner:
         # 1 µm = 100 DBU (when dbu=0.01 µm)
         return int(round(um_value / self.config.dbu))
     
-    def add_text_label(self, cell, text, x_center, y_center, height=None, clearance=None, config=None):
+    def _get_dc_layer_idx(self, config=None):
         """
-        Add text label to cell as actual polygons (for fabrication).
+        Get the layer index for DC pads/traces.
         
-        Creates polygon-based text that will appear on the final wafer.
-        Also returns a clearance region for ground plane subtraction.
+        Uses DC_PAD_LAYER if defined, otherwise falls back to METAL_LAYER.
         
         Args:
-            cell: KLayout cell to insert text into
+            config: design configuration (uses self.config if None)
+        
+        Returns:
+            int: KLayout layer index for DC geometry
+        """
+        if config is None:
+            config = self.config
+        dc_layer = getattr(config, 'DC_PAD_LAYER', config.METAL_LAYER)
+        return self.layout.layer(dc_layer)
+    
+    def add_text_label(self, cell, text, x_center, y_center, height=None, clearance=None, config=None, insert_text=True):
+        """
+        Generate text label polygons and clearance region.
+        
+        Creates polygon-based text that will appear on the final wafer.
+        Optionally inserts the text into the cell and returns a clearance region
+        for ground plane subtraction.
+        
+        Args:
+            cell: KLayout cell to insert text into (can be None if insert_text=False)
             text: Text string to display
             x_center: x-coordinate of text center (µm)
             y_center: y-coordinate of text center (µm)
             height: Height of text in µm (default from config)
             clearance: Clearance around text for ground plane (µm, default from config)
             config: design configuration
+            insert_text: If True, insert text polygons into cell. If False, only return clearance region.
         
         Returns:
             pya.Region: Region representing text clearance box for ground plane subtraction
@@ -158,8 +178,6 @@ class ChipDesigner:
         if clearance is None:
             clearance = config.text_label_clearance
         
-        layer_idx = self.layout.layer(config.METAL_LAYER)
-        
         # Create a TextGenerator for polygon-based text
         gen = pya.TextGenerator.default_generator()
         
@@ -184,70 +202,10 @@ class ChipDesigner:
         offset_y = self._um_to_dbu(y_center) - text_bbox.center().y
         text_region.transform(pya.Trans(offset_x, offset_y))
         
-        # Insert text polygons into cell
-        cell.shapes(layer_idx).insert(text_region)
-        
-        # Create clearance region using bounding box + buffer
-        text_bbox_transformed = text_region.bbox()
-        clearance_dbu = self._um_to_dbu(clearance)
-        clearance_box = pya.Box(
-            text_bbox_transformed.left - clearance_dbu,
-            text_bbox_transformed.bottom - clearance_dbu,
-            text_bbox_transformed.right + clearance_dbu,
-            text_bbox_transformed.top + clearance_dbu
-        )
-        clearance_region = pya.Region(clearance_box)
-        
-        return clearance_region
-    
-    def _create_text_clearance_region(self, text, x_center, y_center, height=None, clearance=None, config=None):
-        """
-        Create clearance region for text without inserting the text.
-        
-        This is used to subtract the clearance from the ground plane before adding text.
-        
-        Args:
-            text: Text string
-            x_center: x-coordinate of text center (µm)
-            y_center: y-coordinate of text center (µm)
-            height: Height of text in µm
-            clearance: Clearance around text (µm)
-            config: design configuration
-        
-        Returns:
-            pya.Region: Region representing text clearance box
-        """
-        if config is None:
-            config = self.config
-        
-        if height is None:
-            height = config.text_label_height
-        if clearance is None:
-            clearance = config.text_label_clearance
-        
-        # Create a TextGenerator for polygon-based text
-        gen = pya.TextGenerator.default_generator()
-        
-        # Generate text at unit scale first to measure its native height
-        test_region = gen.text(text, config.dbu, 1.0)
-        native_height = test_region.bbox().height() * config.dbu  # in µm
-        
-        # Calculate magnification needed to achieve target height
-        if native_height > 0:
-            mag = height / native_height
-        else:
-            mag = 1.0
-        
-        # Generate text with correct magnification
-        text_region = gen.text(text, config.dbu, mag)
-        
-        # Calculate text bounding box to center it
-        text_bbox = text_region.bbox()
-        
-        # Transform to center at (x_center, y_center)
-        offset_x = self._um_to_dbu(x_center) - text_bbox.center().x
-        offset_y = self._um_to_dbu(y_center) - text_bbox.center().y
-        text_region.transform(pya.Trans(offset_x, offset_y))
+        # Insert text polygons into cell if requested
+        if insert_text and cell is not None:
+            layer_idx = self.layout.layer(config.METAL_LAYER)
+            cell.shapes(layer_idx).insert(text_region)
         
         # Create clearance region using bounding box + buffer
         text_bbox_transformed = text_region.bbox()
@@ -260,6 +218,29 @@ class ChipDesigner:
         )
         
         return pya.Region(clearance_box)
+    
+    def _create_text_clearance_region(self, text, x_center, y_center, height=None, clearance=None, config=None):
+        """
+        Create clearance region for text without inserting the text.
+        
+        This is a convenience wrapper around add_text_label with insert_text=False.
+        Used to subtract clearance from ground plane before adding text.
+        
+        Args:
+            text: Text string
+            x_center: x-coordinate of text center (µm)
+            y_center: y-coordinate of text center (µm)
+            height: Height of text in µm
+            clearance: Clearance around text (µm)
+            config: design configuration
+        
+        Returns:
+            pya.Region: Region representing text clearance box
+        """
+        return self.add_text_label(
+            cell=None, text=text, x_center=x_center, y_center=y_center,
+            height=height, clearance=clearance, config=config, insert_text=False
+        )
     
     def create_alignment_cross(self, cell, x_center, y_center, config=None):
         """
@@ -501,16 +482,16 @@ class ChipDesigner:
         
         return vertices
     
-    def create_cpw_signal_line(self, cell, config=None):
-        """
-        DEPRECATED: Use create_tapered_trace instead for signal paths.
-        This method is kept for reference but not called in current design.
-        """
-        pass
-    
     def create_dc_pad_array(self, cell, y_offset, config=None):
         """
         Create DC bond pad array in an arc centered at chip center.
+        
+        Creates the complete DC signal path for each pad:
+        1. Bond pad: Rectangle on arc at dc_pad_arc_radius
+        2. Taper: From pad width to dc_trace_width
+        3. Angled section: Follows ground plane taper slope toward center
+        4. Vertical trace: From angled section to aperture edge
+        5. Fan-out (optional): Traces spread inside aperture on arc at dc_trace_fanout_arc_radius
         
         Args:
             cell: KLayout cell to insert pads into
@@ -530,30 +511,27 @@ class ChipDesigner:
         arc_center_x = chip_center_x
         arc_center_y = chip_center_y
         
-        # Calculate angular spread for pads
-        # Pads are placed on an arc at radius dc_pad_arc_radius
-        # Spread them symmetrically about the vertical axis
         pad_positions = []
         
         # Determine if this is top or bottom array
         is_top = y_offset > 0
         
-        # Arc angle range (spread pads over ~30 degrees for good spacing)
-        total_arc_angle = math.radians(30)  # 30 degrees total spread
+        # Sign multiplier for direction-dependent calculations (+1 for top, -1 for bottom)
+        sign = 1 if is_top else -1
+        
+        # Arc angle range for pad placement (hardcoded 30 degrees)
+        total_arc_angle = math.radians(30)
         
         # Center angle: 90 degrees (top) or 270 degrees (bottom)
-        if is_top:
-            center_angle = math.pi / 2  # 90 degrees (pointing up)
-        else:
-            center_angle = 3 * math.pi / 2  # 270 degrees (pointing down)
+        center_angle = math.pi / 2 if is_top else 3 * math.pi / 2
+        
+        # Get DC layer index once (instead of repeated getattr calls)
+        dc_layer_idx = self._get_dc_layer_idx(config)
         
         # Place pads along arc
         for i in range(config.dc_pad_count):
             # Distribute pads evenly across the arc
-            if config.dc_pad_count > 1:
-                t = (i - (config.dc_pad_count - 1) / 2.0) / ((config.dc_pad_count - 1) / 2.0)
-            else:
-                t = 0
+            t = (i - (config.dc_pad_count - 1) / 2.0) / ((config.dc_pad_count - 1) / 2.0) if config.dc_pad_count > 1 else 0
             
             angle = center_angle + t * (total_arc_angle / 2.0)
             
@@ -570,22 +548,13 @@ class ChipDesigner:
                 self._um_to_dbu(pad_x + config.dc_pad_width / 2.0),
                 self._um_to_dbu(pad_y + config.dc_pad_height / 2.0)
             )
-            # Use DC_PAD_LAYER if available, otherwise fall back to METAL_LAYER
-            dc_layer = getattr(config, 'DC_PAD_LAYER', config.METAL_LAYER)
-            cell.shapes(self.layout.layer(dc_layer)).insert(pad_box)
-            
-            # Create tapered trace from pad inner edge toward center
-            # Taper: pad_width -> dc_trace_width over dc_trace_taper_length
-            # Then trace follows ground plane taper angle (with gap), then goes vertical
+            cell.shapes(dc_layer_idx).insert(pad_box)
             
             # Calculate final trace X position - evenly spaced within entrance width
             # For top: reverse index so left pads connect to left side of entrance
             # For bottom: use original index (pads are mirrored)
             entrance_spacing = config.dc_pad_entrance_width / (config.dc_pad_count + 1)
-            if is_top:
-                trace_index = config.dc_pad_count - 1 - i
-            else:
-                trace_index = i
+            trace_index = (config.dc_pad_count - 1 - i) if is_top else i
             trace_final_x = chip_center_x - config.dc_pad_entrance_width / 2.0 + entrance_spacing * (trace_index + 1)
             
             # Ground plane taper geometry (for reference):
@@ -594,79 +563,39 @@ class ChipDesigner:
             # - Height = dc_pad_entrance_height
             dc_cutout_center_y = chip_center_y + y_offset
             
-            if is_top:
-                # Pad inner edge is at bottom of pad
-                taper_start_y = pad_y - config.dc_pad_height / 2.0
-                taper_end_y = taper_start_y - config.dc_trace_taper_length
-                
-                # Ground plane taper boundaries
-                gp_taper_top_y = dc_cutout_center_y - config.dc_cutout_height / 2.0
-                gp_taper_bottom_y = gp_taper_top_y - config.dc_pad_entrance_height
-                
-                # Trace ends at aperture edge (vertical section)
-                trace_end_y = chip_center_y + config.aperture_radius
-                
-                # Fan-out section: from aperture edge into aperture
-                aperture_penetration = getattr(config, 'dc_trace_aperture_penetration', 0)
-                fanout_width = getattr(config, 'dc_trace_fanout_width', config.dc_pad_entrance_width)
-                fanout_end_y = chip_center_y + config.aperture_radius - aperture_penetration
-            else:
-                # Pad inner edge is at top of pad
-                taper_start_y = pad_y + config.dc_pad_height / 2.0
-                taper_end_y = taper_start_y + config.dc_trace_taper_length
-                
-                # Ground plane taper boundaries
-                gp_taper_top_y = dc_cutout_center_y + config.dc_cutout_height / 2.0
-                gp_taper_bottom_y = gp_taper_top_y + config.dc_pad_entrance_height
-                
-                # Trace ends at aperture edge (vertical section)
-                trace_end_y = chip_center_y - config.aperture_radius
-                
-                # Fan-out section: from aperture edge into aperture
-                aperture_penetration = getattr(config, 'dc_trace_aperture_penetration', 0)
-                fanout_width = getattr(config, 'dc_trace_fanout_width', config.dc_pad_entrance_width)
-                fanout_end_y = chip_center_y - config.aperture_radius + aperture_penetration
+            # Pad inner edge (toward chip center)
+            taper_start_y = pad_y - sign * config.dc_pad_height / 2.0
+            taper_end_y = taper_start_y - sign * config.dc_trace_taper_length
+            
+            # Ground plane taper boundaries
+            gp_taper_top_y = dc_cutout_center_y - sign * config.dc_cutout_height / 2.0
+            gp_taper_bottom_y = gp_taper_top_y - sign * config.dc_pad_entrance_height
+            
+            # Trace ends at aperture edge (vertical section)
+            trace_end_y = chip_center_y + sign * config.aperture_radius
+            
+            # Fan-out parameters
+            aperture_penetration = getattr(config, 'dc_trace_aperture_penetration', 0)
+            fanout_arc_radius = getattr(config, 'dc_trace_fanout_arc_radius', 200.0)
             
             # Create taper polygon (trapezoid) - stays centered on pad_x
-            if is_top:
-                taper_vertices = [
-                    # Wide end (at pad)
-                    pya.Point(self._um_to_dbu(pad_x - config.dc_pad_width / 2.0),
-                             self._um_to_dbu(taper_start_y)),
-                    pya.Point(self._um_to_dbu(pad_x + config.dc_pad_width / 2.0),
-                             self._um_to_dbu(taper_start_y)),
-                    # Narrow end
-                    pya.Point(self._um_to_dbu(pad_x + config.dc_trace_width / 2.0),
-                             self._um_to_dbu(taper_end_y)),
-                    pya.Point(self._um_to_dbu(pad_x - config.dc_trace_width / 2.0),
-                             self._um_to_dbu(taper_end_y)),
-                ]
-            else:
-                taper_vertices = [
-                    # Wide end (at pad)
-                    pya.Point(self._um_to_dbu(pad_x - config.dc_pad_width / 2.0),
-                             self._um_to_dbu(taper_start_y)),
-                    pya.Point(self._um_to_dbu(pad_x + config.dc_pad_width / 2.0),
-                             self._um_to_dbu(taper_start_y)),
-                    # Narrow end
-                    pya.Point(self._um_to_dbu(pad_x + config.dc_trace_width / 2.0),
-                             self._um_to_dbu(taper_end_y)),
-                    pya.Point(self._um_to_dbu(pad_x - config.dc_trace_width / 2.0),
-                             self._um_to_dbu(taper_end_y)),
-                ]
-            
+            # Vertices are the same for both top and bottom (just different y values)
+            taper_vertices = [
+                # Wide end (at pad)
+                pya.Point(self._um_to_dbu(pad_x - config.dc_pad_width / 2.0),
+                         self._um_to_dbu(taper_start_y)),
+                pya.Point(self._um_to_dbu(pad_x + config.dc_pad_width / 2.0),
+                         self._um_to_dbu(taper_start_y)),
+                # Narrow end
+                pya.Point(self._um_to_dbu(pad_x + config.dc_trace_width / 2.0),
+                         self._um_to_dbu(taper_end_y)),
+                pya.Point(self._um_to_dbu(pad_x - config.dc_trace_width / 2.0),
+                         self._um_to_dbu(taper_end_y)),
+            ]
             taper_polygon = pya.Polygon(taper_vertices)
-            # Use DC_PAD_LAYER if available, otherwise fall back to METAL_LAYER
-            dc_layer = getattr(config, 'DC_PAD_LAYER', config.METAL_LAYER)
-            cell.shapes(self.layout.layer(dc_layer)).insert(taper_polygon)
+            cell.shapes(dc_layer_idx).insert(taper_polygon)
             
             # Calculate the angle of the ground plane taper
-            # Ground plane goes from (chip_center_x ± dc_cutout_width/2) at gp_taper_top_y
-            # to (chip_center_x ± dc_pad_entrance_width/2) at gp_taper_bottom_y
-            # The trace should run parallel to this, offset inward by dc_pad_clearance
-            
-            # Angled section: from taper_end to where trace reaches its final X position
-            # The trace follows the ground plane taper slope
             gp_width_change = (config.dc_cutout_width - config.dc_pad_entrance_width) / 2.0
             gp_height = config.dc_pad_entrance_height
             
@@ -674,113 +603,76 @@ class ChipDesigner:
             trace_x_travel = abs(pad_x - trace_final_x)
             
             # Calculate Y distance needed for the angled section (same slope as ground plane)
-            if gp_width_change > 0:
-                angled_section_height = trace_x_travel * (gp_height / gp_width_change)
-            else:
-                angled_section_height = 0
+            angled_section_height = trace_x_travel * (gp_height / gp_width_change) if gp_width_change > 0 else 0
             
+            # Calculate angled end position with clamping
+            angled_end_y = taper_end_y - sign * angled_section_height
             if is_top:
-                angled_end_y = taper_end_y - angled_section_height
-                # Clamp to not go past the entrance
                 angled_end_y = max(angled_end_y, gp_taper_bottom_y)
             else:
-                angled_end_y = taper_end_y + angled_section_height
-                # Clamp to not go past the entrance
                 angled_end_y = min(angled_end_y, gp_taper_bottom_y)
             
             # Create angled trace section (parallelogram)
-            if is_top:
-                angled_vertices = [
-                    # Start at taper end (centered on pad_x)
-                    pya.Point(self._um_to_dbu(pad_x - config.dc_trace_width / 2.0),
-                             self._um_to_dbu(taper_end_y)),
-                    pya.Point(self._um_to_dbu(pad_x + config.dc_trace_width / 2.0),
-                             self._um_to_dbu(taper_end_y)),
-                    # End at angled_end_y (centered on trace_final_x)
-                    pya.Point(self._um_to_dbu(trace_final_x + config.dc_trace_width / 2.0),
-                             self._um_to_dbu(angled_end_y)),
-                    pya.Point(self._um_to_dbu(trace_final_x - config.dc_trace_width / 2.0),
-                             self._um_to_dbu(angled_end_y)),
-                ]
-            else:
-                angled_vertices = [
-                    # Start at taper end (centered on pad_x)
-                    pya.Point(self._um_to_dbu(pad_x - config.dc_trace_width / 2.0),
-                             self._um_to_dbu(taper_end_y)),
-                    pya.Point(self._um_to_dbu(pad_x + config.dc_trace_width / 2.0),
-                             self._um_to_dbu(taper_end_y)),
-                    # End at angled_end_y (centered on trace_final_x)
-                    pya.Point(self._um_to_dbu(trace_final_x + config.dc_trace_width / 2.0),
-                             self._um_to_dbu(angled_end_y)),
-                    pya.Point(self._um_to_dbu(trace_final_x - config.dc_trace_width / 2.0),
-                             self._um_to_dbu(angled_end_y)),
-                ]
-            
+            angled_vertices = [
+                # Start at taper end (centered on pad_x)
+                pya.Point(self._um_to_dbu(pad_x - config.dc_trace_width / 2.0),
+                         self._um_to_dbu(taper_end_y)),
+                pya.Point(self._um_to_dbu(pad_x + config.dc_trace_width / 2.0),
+                         self._um_to_dbu(taper_end_y)),
+                # End at angled_end_y (centered on trace_final_x)
+                pya.Point(self._um_to_dbu(trace_final_x + config.dc_trace_width / 2.0),
+                         self._um_to_dbu(angled_end_y)),
+                pya.Point(self._um_to_dbu(trace_final_x - config.dc_trace_width / 2.0),
+                         self._um_to_dbu(angled_end_y)),
+            ]
             angled_polygon = pya.Polygon(angled_vertices)
-            # Use DC_PAD_LAYER if available, otherwise fall back to METAL_LAYER
-            dc_layer = getattr(config, 'DC_PAD_LAYER', config.METAL_LAYER)
-            cell.shapes(self.layout.layer(dc_layer)).insert(angled_polygon)
+            cell.shapes(dc_layer_idx).insert(angled_polygon)
             
             # Create vertical trace section from angled_end to aperture radius
-            if is_top:
-                vertical_box = pya.Box(
-                    self._um_to_dbu(trace_final_x - config.dc_trace_width / 2.0),
-                    self._um_to_dbu(trace_end_y),
-                    self._um_to_dbu(trace_final_x + config.dc_trace_width / 2.0),
-                    self._um_to_dbu(angled_end_y)
-                )
-            else:
-                vertical_box = pya.Box(
-                    self._um_to_dbu(trace_final_x - config.dc_trace_width / 2.0),
-                    self._um_to_dbu(angled_end_y),
-                    self._um_to_dbu(trace_final_x + config.dc_trace_width / 2.0),
-                    self._um_to_dbu(trace_end_y)
-                )
-            # Use DC_PAD_LAYER if available, otherwise fall back to METAL_LAYER
-            dc_layer = getattr(config, 'DC_PAD_LAYER', config.METAL_LAYER)
-            cell.shapes(self.layout.layer(dc_layer)).insert(vertical_box)
+            # Box constructor needs (min_x, min_y, max_x, max_y)
+            vert_y1, vert_y2 = (trace_end_y, angled_end_y) if is_top else (angled_end_y, trace_end_y)
+            vertical_box = pya.Box(
+                self._um_to_dbu(trace_final_x - config.dc_trace_width / 2.0),
+                self._um_to_dbu(min(vert_y1, vert_y2)),
+                self._um_to_dbu(trace_final_x + config.dc_trace_width / 2.0),
+                self._um_to_dbu(max(vert_y1, vert_y2))
+            )
+            cell.shapes(dc_layer_idx).insert(vertical_box)
             
-            # Create fan-out section inside the aperture
-            # Traces fan out from entrance_width spacing to fanout_width spacing
+            # Create fan-out section inside the aperture using arc positioning
             if aperture_penetration > 0:
-                # Calculate fan-out end X position
-                fanout_spacing = fanout_width / (config.dc_pad_count + 1)
-                if is_top:
-                    fanout_trace_index = config.dc_pad_count - 1 - i
-                else:
-                    fanout_trace_index = i
-                fanout_final_x = chip_center_x - fanout_width / 2.0 + fanout_spacing * (fanout_trace_index + 1)
+                # Calculate angular spread for fanout (independent of bond pad arc)
+                fanout_arc_angle_deg = getattr(config, 'dc_trace_fanout_arc_angle', 30.0)
+                fanout_total_arc_angle = math.radians(fanout_arc_angle_deg)
                 
-                # Create fan-out polygon (trapezoid from vertical trace to fanned position)
-                if is_top:
-                    fanout_vertices = [
-                        # Start at aperture edge (vertical trace position)
-                        pya.Point(self._um_to_dbu(trace_final_x - config.dc_trace_width / 2.0),
-                                 self._um_to_dbu(trace_end_y)),
-                        pya.Point(self._um_to_dbu(trace_final_x + config.dc_trace_width / 2.0),
-                                 self._um_to_dbu(trace_end_y)),
-                        # End at fanned-out position inside aperture
-                        pya.Point(self._um_to_dbu(fanout_final_x + config.dc_trace_width / 2.0),
-                                 self._um_to_dbu(fanout_end_y)),
-                        pya.Point(self._um_to_dbu(fanout_final_x - config.dc_trace_width / 2.0),
-                                 self._um_to_dbu(fanout_end_y)),
-                    ]
-                else:
-                    fanout_vertices = [
-                        # Start at aperture edge (vertical trace position)
-                        pya.Point(self._um_to_dbu(trace_final_x - config.dc_trace_width / 2.0),
-                                 self._um_to_dbu(trace_end_y)),
-                        pya.Point(self._um_to_dbu(trace_final_x + config.dc_trace_width / 2.0),
-                                 self._um_to_dbu(trace_end_y)),
-                        # End at fanned-out position inside aperture
-                        pya.Point(self._um_to_dbu(fanout_final_x + config.dc_trace_width / 2.0),
-                                 self._um_to_dbu(fanout_end_y)),
-                        pya.Point(self._um_to_dbu(fanout_final_x - config.dc_trace_width / 2.0),
-                                 self._um_to_dbu(fanout_end_y)),
-                    ]
+                # Center angle: 90 degrees (top) or 270 degrees (bottom)
+                fanout_center_angle = math.pi / 2 if is_top else 3 * math.pi / 2
+                
+                # Calculate angle for this trace
+                fanout_t = (i - (config.dc_pad_count - 1) / 2.0) / ((config.dc_pad_count - 1) / 2.0) if config.dc_pad_count > 1 else 0
+                
+                fanout_angle = fanout_center_angle + fanout_t * (fanout_total_arc_angle / 2.0)
+                
+                # Fan-out end position on arc
+                fanout_final_x = chip_center_x + fanout_arc_radius * math.cos(fanout_angle)
+                fanout_final_y = chip_center_y + fanout_arc_radius * math.sin(fanout_angle)
+                
+                # Create fan-out polygon (trapezoid from vertical trace to arc position)
+                fanout_vertices = [
+                    # Start at aperture edge (vertical trace position)
+                    pya.Point(self._um_to_dbu(trace_final_x - config.dc_trace_width / 2.0),
+                             self._um_to_dbu(trace_end_y)),
+                    pya.Point(self._um_to_dbu(trace_final_x + config.dc_trace_width / 2.0),
+                             self._um_to_dbu(trace_end_y)),
+                    # End at fanned-out position on arc inside aperture
+                    pya.Point(self._um_to_dbu(fanout_final_x + config.dc_trace_width / 2.0),
+                             self._um_to_dbu(fanout_final_y)),
+                    pya.Point(self._um_to_dbu(fanout_final_x - config.dc_trace_width / 2.0),
+                             self._um_to_dbu(fanout_final_y)),
+                ]
                 
                 fanout_polygon = pya.Polygon(fanout_vertices)
-                cell.shapes(self.layout.layer(dc_layer)).insert(fanout_polygon)
+                cell.shapes(dc_layer_idx).insert(fanout_polygon)
         
         return pad_positions
     
@@ -1162,7 +1054,7 @@ class ChipDesigner:
         right_gap_top_polygon = pya.Polygon(right_gap_vertices)
         ground_region -= pya.Region(right_gap_top_polygon)
         
-        # Bottom gap (symmetric)D
+        # Bottom gap (symmetric)
         right_gap_vertices_bot = [
             pya.Point(self._um_to_dbu(right_taper_start_x - config.cpw_gap), 
                      self._um_to_dbu(pad_y_center - config.cpw_signal_width/2.0 - config.cpw_gap)),

@@ -32,7 +32,14 @@ create_chip_cell = chip_module.create_chip_cell
 
 
 class ChipConfig:
-    """Chip design parameters - local copy for wafer-level customization."""
+    """
+    Chip design parameters - local copy for wafer-level customization.
+    
+    This class mirrors DesignConfig from 6x6mm_sample_chip_V1.py to allow
+    per-chip customization of parameters like aperture_radius when creating
+    the wafer array. Both classes define the same parameters to maintain
+    compatibility with the chip generation code.
+    """
     
     # Database unit: 0.01 µm = 10 nm
     dbu = 0.01  # 1 DBU = 10 nm
@@ -56,7 +63,7 @@ class ChipConfig:
     pad_height = 800.0        # Vertical dimension (µm)
     
     # Taper specifications
-    taper_length = 50.0      # Length of rapid taper from pad to CPW (µm)
+    taper_length = 125.0      # Length of rapid taper from pad to CPW (µm)
     
     # Aperture (circular hole for interior design)
     aperture_radius = 400.0   # Radius of circular center aperture (µm)
@@ -77,12 +84,13 @@ class ChipConfig:
     dc_pad_clearance = 50.0          # Clearance around DC pads (µm)
     dc_cutout_width = dc_pad_clearance*(dc_pad_count+1)+dc_pad_width*dc_pad_count
     dc_cutout_height = dc_pad_clearance*4+dc_pad_height
-    dc_pad_entrance_width = 150.0    # Width at narrow end of taper to aperture (µm)
+    dc_pad_entrance_width = 250.0    # Width at narrow end of taper to aperture (µm)
     dc_pad_entrance_height = aperture_radius + 50.0  # Height of tapered entrance section (µm)
     dc_trace_width = 10.0            # Width of DC traces after taper (µm)
     dc_trace_taper_length = 80.0     # Length of taper from pad to trace (µm)
     dc_trace_aperture_penetration = 80.0  # How far DC traces extend into aperture (µm)
-    dc_trace_fanout_width = 300.0    # Total width of fanned-out traces at aperture center (µm)
+    dc_trace_fanout_arc_radius = 250.0  # Radius of arc for trace fanout inside aperture (µm)
+    dc_trace_fanout_arc_angle = 40.0   # Total angular spread for trace fanout (degrees)
     dc_aperture_triangle_base = 100.0  # Length along circle edge for triangular cutout (µm)
     dc_aperture_triangle_height = 20.0  # Depth of triangular cutout into aperture (µm)
     
@@ -114,7 +122,7 @@ class OmegaConfig:
     trace_width = 10.0               # Width of ring trace (µm)
     omega_spacing = 50.0             # Spacing between omega rings (µm)
     omega_trace_gap = 15.0           # Gap width to break the ring loop (µm)
-    omega_taper_length = 50.0        # Taper length from CPW width to omega trace width (µm)
+    omega_taper_length = 100.0        # Taper length from CPW width to omega trace width (µm)
     
     def __init__(self, center_radius=None, trace_width=None, omega_spacing=None, 
                  omega_trace_gap=None, omega_taper_length=None):
@@ -205,30 +213,36 @@ class WaferDesigner:
             # Chip 0: 40 µm omega, default aperture (400), trace 10
             chip0 = ChipConfig()
             chip0.aperture_radius = 250.0
+            chip0.dc_trace_fanout_arc_radius = chip0.aperture_radius - 50.0
             omega0 = OmegaConfig(center_radius=30.0, trace_width=10.0, omega_trace_gap=10)
             
             # Chip 1: 80 µm omega, default aperture (400), trace 10
             chip1 = ChipConfig()
             chip1.aperture_radius = 300.0
+            chip1.dc_trace_fanout_arc_radius = chip1.aperture_radius - 50.0
             omega1 = OmegaConfig(center_radius=50.0, trace_width=10.0, omega_trace_gap=10)
             
             # Chip 2: 120 µm omega, aperture 500, trace 12.5
             chip2 = ChipConfig()
             chip2.aperture_radius = 350.0
+            chip2.dc_trace_fanout_arc_radius = chip2.aperture_radius - 50.0
             omega2 = OmegaConfig(center_radius=75.0, trace_width=12.5)
             
             # Chip 3: 150 µm omega, aperture 500, trace 15
             chip3 = ChipConfig()
             chip3.aperture_radius = 450.0
+            chip3.dc_trace_fanout_arc_radius = chip3.aperture_radius - 50.0
             omega3 = OmegaConfig(center_radius=100.0, trace_width=15.0)
             
             # Chip 4: 200 µm omega, aperture 600, trace 20
             chip4 = ChipConfig()
             chip4.aperture_radius = 600.0
+            chip4.dc_trace_fanout_arc_radius = chip4.aperture_radius - 50.0
             omega4 = OmegaConfig(center_radius=125.0, trace_width=20.0)
             
             # Chip 5: Blank (no omega), default aperture
             chip5 = ChipConfig()
+            chip5.dc_trace_fanout_arc_radius = chip5.aperture_radius - 50.0
             omega5 = None
             
             chip_configs = [chip0, chip1, chip2, chip3, chip4, chip5]
@@ -1354,11 +1368,11 @@ def main():
     print(f"  Electroplating:      {wafer_config.electroplating}")
     print()
     print("Chip Variants (repeating 2x3 pattern):")
-    print("  Chip 0: 40 µm omega, aperture 400, trace 10")
-    print("  Chip 1: 80 µm omega, aperture 400, trace 10")
-    print("  Chip 2: 120 µm omega, aperture 500, trace 12.5")
-    print("  Chip 3: 150 µm omega, aperture 550, trace 15")
-    print("  Chip 4: 200 µm omega, aperture 650, trace 20")
+    print("  Chip 0: 60 µm omega, aperture 250, trace 10")
+    print("  Chip 1: 100 µm omega, aperture 300, trace 10")
+    print("  Chip 2: 150 µm omega, aperture 350, trace 12.5")
+    print("  Chip 3: 200 µm omega, aperture 450, trace 15")
+    print("  Chip 4: 250 µm omega, aperture 600, trace 20")
     print("  Chip 5: Blank (no omega)")
     print()
     
