@@ -1032,7 +1032,8 @@ class MaskDesigner:
         label_lines = [
             design_name,
             date_str,
-            "Layer 1/2 - CPW"
+            "Layer 1/2 - CPW",
+            "Jayich Lab - Jeff Ahlers"
         ]
         N = len(label_lines)
         total_label_height = N * text_height + (N - 1) * line_spacing
@@ -1051,7 +1052,8 @@ class MaskDesigner:
         dc_label_lines = [
             design_name,
             date_str,
-            "Layer 2/2 - DC Contacts"
+            "Layer 2/2 - DC Contacts",
+            "Jayich Lab - Jeff Ahlers"
         ]
         current_y = label_y
         for line in dc_label_lines:
