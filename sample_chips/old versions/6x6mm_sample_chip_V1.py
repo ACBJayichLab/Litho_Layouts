@@ -65,6 +65,7 @@ class DesignConfig:
     dc_pad_count = 6                 # Number of DC pads per array
     dc_pad_y_offset = 1500.0         # Distance from chip center to DC pad array center (µm)
     dc_pad_arc_radius = 1500.0       # Radius of arc for DC pad placement (µm)
+    dc_pad_inner_y_shift = 0.0       # Y shift for inner 4 pads toward center (µm, positive = toward center)
     dc_pad_clearance = 50.0          # Clearance around DC pads (µm)
     dc_cutout_width = dc_pad_clearance*(dc_pad_count+1)+dc_pad_width*dc_pad_count        # Width of rectangular cutout for DC pads (µm)
     dc_cutout_height = dc_pad_clearance*4+dc_pad_height        # Height of rectangular cutout for DC pads (µm)
@@ -583,6 +584,13 @@ class ChipDesigner:
             # Calculate pad center position on arc
             pad_x = arc_center_x + config.dc_pad_arc_radius * math.cos(angle)
             pad_y = arc_center_y + config.dc_pad_arc_radius * math.sin(angle)
+            
+            # Apply Y shift for inner pads (indices 1, 2, 3, 4 for 6 pads)
+            # Shift them toward the chip center
+            inner_y_shift = getattr(config, 'dc_pad_inner_y_shift', 0.0)
+            if inner_y_shift > 0 and config.dc_pad_count == 6 and i in [1, 2, 3, 4]:
+                # Shift toward center: subtract for top array, add for bottom array
+                pad_y = pad_y - sign * inner_y_shift
             
             pad_positions.append((pad_x, pad_y))
             

@@ -21,7 +21,7 @@ from pathlib import Path
 import importlib.util
 
 # Load the chip module dynamically (handles filename with numbers)
-chip_module_path = Path(__file__).parent / "6x6mm_sample_chip_V1.py"
+chip_module_path = Path(__file__).parent / "6x6mm_sample_chip_V2.py"
 spec = importlib.util.spec_from_file_location("chip_module", chip_module_path)
 chip_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(chip_module)

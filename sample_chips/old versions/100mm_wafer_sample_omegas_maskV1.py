@@ -86,6 +86,7 @@ class ChipConfig:
     dc_pad_y_offset = 1500.0         # Distance from chip center to DC pad array center (µm)
     dc_pad_arc_radius = 1500.0       # Radius of arc for DC pad placement (µm)
     dc_pad_arc_angle = 60.0          # Total angular spread for DC pad placement (degrees)
+    dc_pad_inner_y_shift = 150.0     # Y shift for inner 4 pads toward center (µm, positive = toward center)
     dc_pad_clearance = 100.0         # Clearance around DC pads (µm)
     dc_cutout_width = dc_pad_clearance*(dc_pad_count+1)+dc_pad_width*dc_pad_count
     dc_cutout_height = dc_pad_clearance*4+dc_pad_height
