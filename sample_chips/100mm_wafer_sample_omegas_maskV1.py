@@ -114,6 +114,12 @@ class ChipConfig:
     electroplating = True            # Enable electroplating tabs
     electroplating_tab_width = 25.0  # Width of electroplating tabs (µm)
     electroplating_tab_clearance = 50.0  # Clearance around signal tab in ground plane (µm)
+    
+    # DC wire parameters (for blank/clear opening chips)
+    dc_wire_width = 10.0             # Width of DC wire (µm)
+    dc_wire_pad_overlap = 30.0       # How far wire extends into bond pad (µm)
+    dc_wire_ground_overlap = 30.0    # How far wire extends into ground plane (µm)
+    dc_wire_gap = 150.0              # Gap between bond pad and ground plane (µm)
 
 
 class OmegaConfig:
@@ -563,6 +569,55 @@ class MaskDesigner:
         
         print(f"  → Omega design: 4 rings (r={center_radius:.0f} µm, w={trace_width:.0f} µm, gap={trace_gap:.0f} µm) at ({x_center:.0f}, {y_center:.0f}) µm")
     
+    def create_dc_wire_from_cpw(self, cell, x_center, y_center, chip_config):
+        """
+        Create a DC wire from the right bond pad for blank/clear opening chips.
+        
+        The wire is placed on layer 3/0 (DC contacts) and extends from the right
+        bond pad outward across the gap into the nearby ground plane.
+        
+        Args:
+            cell: KLayout cell to insert design into
+            x_center: x-coordinate of chip center (µm)
+            y_center: y-coordinate of chip center (µm)
+            chip_config: ChipConfig instance for chip parameters
+        
+        Returns:
+            None (modifies cell in place)
+        """
+        config = self.mask_config
+        metal_layer_idx = self.layout.layer(config.METAL_LAYER)
+        
+        # Get wire parameters from chip config
+        wire_width = chip_config.dc_wire_width
+        pad_overlap = chip_config.dc_wire_pad_overlap
+        ground_overlap = chip_config.dc_wire_ground_overlap
+        gap = chip_config.dc_wire_gap
+        
+        # Total wire length = pad_overlap + gap + ground_overlap
+        wire_length = pad_overlap + gap + ground_overlap
+        
+        # Calculate right bond pad position
+        # right_pad_x = chip_width - edge_buffer - pad_width (left edge of pad)
+        # right edge of pad = right_pad_x + pad_width
+        right_pad_x = chip_config.chip_width - chip_config.edge_buffer - chip_config.pad_width
+        right_pad_right_edge = right_pad_x + chip_config.pad_width
+        
+        # Wire starts inside the bond pad and extends outward
+        wire_start_x = right_pad_right_edge - pad_overlap
+        wire_end_x = wire_start_x + wire_length
+        
+        # Create the wire rectangle on DC layer (3/0)
+        wire_box = pya.Box(
+            self._um_to_dbu(wire_start_x),
+            self._um_to_dbu(y_center - wire_width / 2.0),
+            self._um_to_dbu(wire_end_x),
+            self._um_to_dbu(y_center + wire_width / 2.0)
+        )
+        cell.shapes(metal_layer_idx).insert(wire_box)
+        
+        print(f"  → DC wire: {wire_width:.0f} µm wire at x={wire_start_x:.0f} to {wire_end_x:.0f} µm, y={y_center:.0f} µm, length {wire_length:.0f} µm")
+    
     def chip_fits_in_wafer(self, chip_x, chip_y, chip_width, chip_height, usable_radius):
         """
         Check if a chip rectangle fits entirely within the usable wafer circle.
@@ -651,17 +706,17 @@ class MaskDesigner:
                 # Create chip cell using the imported chip designer
                 chip_cell = create_chip_cell(self.layout, chip_config, f"chip_variant_{chip_index}", chip_label)
                 
-                # Create wrapper cell for this chip variant at its position in unit cell
-                wrapper_cell = self.layout.create_cell(f"chip_wrapper_{chip_index}")
-                wrapper_cell.insert(pya.CellInstArray(chip_cell.cell_index(), pya.Trans()))
+                # Add omega or DC wire directly to the chip cell
+                chip_center_x = chip_config.chip_width / 2.0
+                chip_center_y = chip_config.chip_height / 2.0
                 
-                # Add omega if configured
                 if omega_config is not None:
-                    chip_center_x = chip_config.chip_width / 2.0
-                    chip_center_y = chip_config.chip_height / 2.0
-                    self.create_omega(wrapper_cell, chip_center_x, chip_center_y, omega_config, chip_config)
+                    self.create_omega(chip_cell, chip_center_x, chip_center_y, omega_config, chip_config)
+                else:
+                    # For blank chips (no omega), add DC wire from right CPW line
+                    self.create_dc_wire_from_cpw(chip_cell, chip_center_x, chip_center_y, chip_config)
                 
-                chip_variant_cells.append((wrapper_cell, chip_x, chip_y, chip_config, omega_config))
+                chip_variant_cells.append((chip_cell, chip_x, chip_y, chip_config, omega_config))
                 
                 print(f"    Chip variant {chip_index} at ({chip_x:.0f}, {chip_y:.0f}) µm" + 
                       (f" (ω radius: {omega_config.center_radius:.0f} µm)" if omega_config else " (blank - no omega)"))
