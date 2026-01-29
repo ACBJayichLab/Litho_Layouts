@@ -61,14 +61,15 @@ class DesignConfig:
     dicing_margin = 100.0           # Margin from chip edge where no metal is placed (µm)
     
     # DC bond pad array (top and bottom)
-    dc_pad_width = 125.0             # DC pad width (µm)
+    dc_pad_width = 187.5             # DC pad width (µm) - increased 50% from 125
+    dc_cutout_pad_width = 125.0      # Original pad width for ground plane cutout calculation (µm)
     dc_pad_height = 125.0            # DC pad height (µm)
     dc_pad_count = 6                 # Number of DC pads per array
     dc_pad_y_offset = 1500.0         # Distance from chip center to DC pad array center (µm)
     dc_pad_arc_radius = 1500.0       # Radius of arc for DC pad placement (µm)
     dc_pad_inner_y_shift = 0.0       # Y shift for inner 4 pads toward center (µm, positive = toward center)
     dc_pad_clearance = 50.0          # Clearance around DC pads (µm)
-    dc_cutout_width = dc_pad_clearance*(dc_pad_count+1)+dc_pad_width*dc_pad_count        # Width of rectangular cutout for DC pads (µm)
+    dc_cutout_width = dc_pad_clearance*(dc_pad_count+1)+dc_cutout_pad_width*dc_pad_count        # Width of rectangular cutout for DC pads (µm)
     dc_cutout_height = dc_pad_clearance*4+dc_pad_height        # Height of rectangular cutout for DC pads (µm)
     dc_pad_entrance_width = 150.0    # Width at narrow end of taper to aperture (µm)
     dc_pad_entrance_height = aperture_radius + 50.0  # Height of tapered entrance section (µm)
@@ -920,8 +921,9 @@ class ChipDesigner:
             
             # Calculate the angle of the ground plane taper
             # Width is computed dynamically based on DC pad arc angle
+            # Use dc_cutout_pad_width to keep ground plane unchanged
             pad_horizontal_extent = config.dc_pad_arc_radius * math.sin(half_arc_angle_rad)
-            cutout_width = 2.0 * (pad_horizontal_extent + config.dc_pad_width / 2.0 + config.dc_pad_clearance)
+            cutout_width = 2.0 * (pad_horizontal_extent + config.dc_cutout_pad_width / 2.0 + config.dc_pad_clearance)
             
             gp_width_change = (cutout_width - config.dc_pad_entrance_width) / 2.0
             gp_height = config.dc_pad_entrance_height
@@ -1100,7 +1102,8 @@ class ChipDesigner:
         pad_horizontal_extent = config.dc_pad_arc_radius * math.sin(half_arc_angle_rad)
         
         # Total cutout width: 2x (pad extent + half pad width + clearance)
-        cutout_width = 2.0 * (pad_horizontal_extent + config.dc_pad_width / 2.0 + config.dc_pad_clearance)
+        # Use dc_cutout_pad_width to keep ground plane unchanged
+        cutout_width = 2.0 * (pad_horizontal_extent + config.dc_cutout_pad_width / 2.0 + config.dc_pad_clearance)
         
         # Vertical extent: from chip edge (with clearance) to innermost pad edge
         # The innermost pad edge is determined by the arc geometry
@@ -1153,10 +1156,11 @@ class ChipDesigner:
         sign = 1 if is_top else -1
         
         # Calculate wide width based on arc geometry (same as create_dc_cutout_region)
+        # Use dc_cutout_pad_width to keep ground plane unchanged
         dc_pad_arc_angle_deg = getattr(config, 'dc_pad_arc_angle', 30.0)
         half_arc_angle_rad = math.radians(dc_pad_arc_angle_deg / 2.0)
         pad_horizontal_extent = config.dc_pad_arc_radius * math.sin(half_arc_angle_rad)
-        wide_width = 2.0 * (pad_horizontal_extent + config.dc_pad_width / 2.0 + config.dc_pad_clearance)
+        wide_width = 2.0 * (pad_horizontal_extent + config.dc_cutout_pad_width / 2.0 + config.dc_pad_clearance)
         
         # Calculate taper start Y position based on innermost pad edge
         # The outermost pads (at half_arc_angle from center) are at:

@@ -81,7 +81,7 @@ class ChipConfig:
     dicing_margin = 100.0           # Margin from chip edge where no metal is placed (µm)
     
     # DC bond pad array (top and bottom)
-    dc_pad_width = 125.0             # DC pad width (µm)
+    dc_pad_width = 187.5             # DC pad width (µm) - increased 50% from 125
     dc_pad_height = 125.0            # DC pad height (µm)
     dc_pad_count = 6                 # Number of DC pads per array
     dc_pad_y_offset = 1500.0         # Distance from chip center to DC pad array center (µm)
@@ -89,7 +89,9 @@ class ChipConfig:
     dc_pad_arc_angle = 60.0          # Total angular spread for DC pad placement (degrees)
     dc_pad_inner_y_shift = 125.0     # Y shift for inner 4 pads toward center (µm, positive = toward center)
     dc_pad_clearance = 100.0         # Clearance around DC pads (µm)
-    dc_cutout_width = dc_pad_clearance*(dc_pad_count+1)+dc_pad_width*dc_pad_count
+    # Use original 125 µm pad width for cutout to keep ground plane unchanged
+    dc_cutout_pad_width = 125.0      # Original pad width for ground plane cutout calculation
+    dc_cutout_width = dc_pad_clearance*(dc_pad_count+1)+dc_cutout_pad_width*dc_pad_count
     dc_cutout_height = dc_pad_clearance*4+dc_pad_height
     dc_pad_entrance_width = 250.0    # Width at narrow end of taper to aperture (µm)
     dc_pad_entrance_height = aperture_radius + 50.0  # Height of tapered entrance section (µm)
