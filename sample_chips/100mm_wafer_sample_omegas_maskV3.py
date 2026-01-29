@@ -1126,7 +1126,7 @@ class MaskDesigner:
         # Text parameters
         text_height = 1500.0  # 1500 µm tall text
         line_spacing = 150.0  # 100 µm gap between lines
-        margin = 5000.0         # 400 µm from mask plate edge
+        margin = 10000.0        # 10 mm from mask plate edge (moved inward)
         
         # Top-left corner: x = margin, y = mask_height - margin - text_height (first line)
         label_x = -mask_width/2 + margin
