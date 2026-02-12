@@ -31,7 +31,7 @@ import klayout.db as pya
 import math
 import os
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
 
 
 # =============================================================================
@@ -71,8 +71,8 @@ class ChipConfig:
 class GoldLayerConfig:
     """Gold layer (1/0) design parameters - CPW, ground, DC contacts."""
     # RF Bond pads
-    rf_pad_width: float = 600.0     # um (in Y direction)
-    rf_pad_height: float = 800.0    # um (in X direction, along CPW)
+    rf_pad_width: float = 800.0     # um (in Y direction)
+    rf_pad_height: float = 600.0    # um (in X direction, along CPW)
     rf_pad_clearance: float = 50.0  # um from ground plane
     
     # CPW transmission line
@@ -89,35 +89,68 @@ class GoldLayerConfig:
     omega_trace_width: float = 8.0     # um (width of omega trace)
     omega_spacing: float = 50.0        # um (distance from center to ring center)
     omega_trace_gap: float = 25.0      # um (gap width to break ring loop)
-    omega_taper_length: float = 100.0  # um (taper from CPW to omega trace width)
+    omega_taper_length: float = 250.0  # um (taper from CPW to omega trace width)
+    omega_taper_cpw_inset: float = 150.0    # um how far taper starts into CPW (before aperture edge)
     omega_lateral_offset: float = 30.0      # um horizontal offset for diagonal arrangement
-    # DC contact pads (larger than V3)
-    dc_pad_size: float = 100.0      # um × um square
-    dc_pad_spacing: float = 150.0   # um center-to-center
-    dc_pad_count: int = 8           # number of DC pads per array
-    dc_pad_y_offset: float = 1500.0 # um from chip center
+    
+    # DC access system (above and below aperture, mirrored ±Y)
+    # All Y offsets are from chip center; geometry is mirrored to both sides.
+    #
+    # --- Cutout rectangle (ground plane opening) ---
+    dc_cutout_cy: float = 1500.0        # um from chip center to cutout center Y
+    dc_cutout_width: float = 2100.0     # um
+    dc_cutout_height: float = 500.0     # um
+    dc_cutout_aperture_width: float = 50.0  # um width where cutout goes vertical
+    dc_cutout_taper_angle: float = 50.0      # degrees from vertical for cutout taper
+    
+    # --- DC bond pads ---
+    dc_pad_cy: float = 1500.0          # um from chip center to innermost pad center Y
+    dc_pad_width: float = 250.0        # um
+    dc_pad_height: float = 250.0       # um
+    dc_pad_count: int = 6              # pads per side
+    dc_pad_pitch: float = 350.0        # um X spacing center-to-center
+    dc_pad_stagger: float = 0.0      # um max Y offset (outer pads shift toward chip center)
+    
+    # --- Taper (pad bottom → feedline) ---
+    dc_taper_height: float = 200.0     # um vertical extent
+    dc_taper_angle: float = 25.0       # degrees from vertical (X shift of narrow end)
+    
+    # --- Feedlines (taper tip → vertical → through aperture → fan-out) ---
+    dc_feedline_width: float = 10.0    # um trace width
+    dc_feedline_pitch: float = 20.0    # um X spacing at vertical section and beyond
+    dc_feedline_clearance: float = 15.0  # um ground plane gap around feedlines
+    dc_feedline_vertical_cy: float = 500.0  # um from chip center where feedlines go vertical
+    
+    # --- Fan-out (inside aperture) ---
+    dc_fanout_straight: float = 40.0   # um vertical run inside aperture before fan-out
+    dc_fanout_height: float = 60.0     # um total penetration past aperture edge
+    dc_fanout_pitch: float = 36.0      # um X spacing at fan-out tips
+    
+    # Alignment marks
+    alignment_mark_offset: float = 2000.0   # um from chip center (placed at ±offset, ±offset)
+    alignment_mark_size: float = 250.0      # um cross arm length
+    alignment_mark_width: float = 20.0      # um cross arm trace width
     
     # Edge buffer for RF pads
-    edge_buffer: float = 200.0      # um from chip edge to pad
+    edge_buffer: float = 400.0      # um from chip edge to pad
 
 
 @dataclass
 class PlatinumConfig:
     """Platinum layer (2/0) design parameters - PRT thermometer."""
-    # PRT bond pads (larger than V3)
-    prt_pad_size: float = 200.0     # um × um square (was 125 um)
+    # Overall feature dimensions
+    prt_width: float = 5000.0       # um total length (X)
+    prt_height: float = 420.0       # um total height (Y)
+    prt_cy: float = 2500.0          # um from chip center (placed at ±cy)
     
-    # PRT serpentine trace
-    prt_trace_width: float = 10.0   # um
-    prt_trace_gap: float = 20.0     # um centerline-to-centerline
+    # Bond pads at each end
+    prt_pad_width: float = 500.0    # um (X extent)
+    prt_pad_height: float = prt_height   # um (Y extent, matches prt_height)
     
-    # PRT region positioning (further from DC contacts)
-    prt_region_width: float = 400.0 # um
-    prt_region_height: float = 1200.0  # um
-    prt_y_offset: float = 2000.0    # um from chip center (further than V3)
-    
-    # Ground plane separation
-    prt_ground_clearance: float = 100.0  # um between PRT and DC regions
+    # Serpentine trace
+    prt_trace_width: float = 8.0   # um line width
+    prt_trace_spacing: float = 10.0 # um gap between lines
+    prt_pad_spacing: float = 20.0   # um gap between Au bond pad and Pt serpentine
 
 
 # =============================================================================
@@ -159,82 +192,89 @@ class ChipDesigner:
     
     def create_rf_bond_pads(self, cell: pya.Cell) -> Tuple[float, float]:
         """
-        Create RF bond pads on gold layer (left and right sides).
+        Create RF bond pads with integrated tapers on gold layer (left and right sides).
         
-        Pads are rectangular, positioned at chip edges with edge_buffer clearance.
+        Each pad is a combined polygon: rectangular pad + trapezoidal taper.
+        This eliminates duplicate geometry between pad and CPW taper.
         
         Returns:
-            Tuple of (left_pad_right_edge_x, right_pad_left_edge_x) for taper connections
+            Tuple of (left_taper_end_x, right_taper_start_x) for CPW connections
         """
-        chip_cx = self.chip.chip_width / 2.0
         chip_cy = self.chip.chip_height / 2.0
         
-        # Left pad: positioned at left edge
+        # Left pad: positioned at left edge with integrated taper
         left_pad_x = self.gold.edge_buffer  # left edge of pad
-        left_pad_box = pya.Box(
-            self._um_to_dbu(left_pad_x),
-            self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0),
-            self._um_to_dbu(left_pad_x + self.gold.rf_pad_height),
-            self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0)
-        )
-        cell.shapes(self.gold_layer_idx).insert(left_pad_box)
-        
-        # Right pad: positioned at right edge
-        right_pad_x = self.chip.chip_width - self.gold.edge_buffer - self.gold.rf_pad_height
-        right_pad_box = pya.Box(
-            self._um_to_dbu(right_pad_x),
-            self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0),
-            self._um_to_dbu(right_pad_x + self.gold.rf_pad_height),
-            self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0)
-        )
-        cell.shapes(self.gold_layer_idx).insert(right_pad_box)
-        
-        # Return pad edges for taper connections
         left_pad_right_x = left_pad_x + self.gold.rf_pad_height
-        right_pad_left_x = right_pad_x
+        left_taper_end_x = left_pad_right_x + self.gold.cpw_taper_length
         
-        return left_pad_right_x, right_pad_left_x
+        # Combined left pad + taper polygon (6 vertices)
+        left_pad_with_taper = pya.Polygon([
+            # Rectangular pad portion (counter-clockwise from bottom-left)
+            pya.Point(self._um_to_dbu(left_pad_x),
+                     self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0)),
+            pya.Point(self._um_to_dbu(left_pad_x),
+                     self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0)),
+            # Taper portion (continues from top of pad to narrow CPW end)
+            pya.Point(self._um_to_dbu(left_pad_right_x),
+                     self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0)),
+            pya.Point(self._um_to_dbu(left_taper_end_x),
+                     self._um_to_dbu(chip_cy + self.gold.cpw_signal_width / 2.0)),
+            pya.Point(self._um_to_dbu(left_taper_end_x),
+                     self._um_to_dbu(chip_cy - self.gold.cpw_signal_width / 2.0)),
+            pya.Point(self._um_to_dbu(left_pad_right_x),
+                     self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0)),
+        ])
+        cell.shapes(self.gold_layer_idx).insert(left_pad_with_taper)
+        
+        # Right pad: positioned at right edge with integrated taper
+        right_pad_x = self.chip.chip_width - self.gold.edge_buffer - self.gold.rf_pad_height
+        right_taper_start_x = right_pad_x - self.gold.cpw_taper_length
+        
+        # Combined right pad + taper polygon (6 vertices)
+        right_pad_with_taper = pya.Polygon([
+            # Taper portion (starts narrow at CPW, widens to pad)
+            pya.Point(self._um_to_dbu(right_taper_start_x),
+                     self._um_to_dbu(chip_cy - self.gold.cpw_signal_width / 2.0)),
+            pya.Point(self._um_to_dbu(right_taper_start_x),
+                     self._um_to_dbu(chip_cy + self.gold.cpw_signal_width / 2.0)),
+            pya.Point(self._um_to_dbu(right_pad_x),
+                     self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0)),
+            # Rectangular pad portion
+            pya.Point(self._um_to_dbu(right_pad_x + self.gold.rf_pad_height),
+                     self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0)),
+            pya.Point(self._um_to_dbu(right_pad_x + self.gold.rf_pad_height),
+                     self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0)),
+            pya.Point(self._um_to_dbu(right_pad_x),
+                     self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0)),
+        ])
+        cell.shapes(self.gold_layer_idx).insert(right_pad_with_taper)
+        
+        # Return taper end positions for CPW connections
+        return left_taper_end_x, right_taper_start_x
     
     def create_cpw_signal_path(self, cell: pya.Cell, 
-                               left_pad_right_x: float, 
-                               right_pad_left_x: float) -> None:
+                               left_taper_end_x: float, 
+                               right_taper_start_x: float) -> None:
         """
-        Create CPW signal line with tapers connecting pads to omegas.
+        Create CPW signal line sections connecting bond pad tapers to omega resonators.
         
-        Signal path: Left Pad → Taper → CPW → Omegas → CPW → Taper → Right Pad
+        Signal path: Left Pad+Taper → CPW → Omegas → CPW → Taper+Right Pad
+        
+        Note: Pad-to-CPW tapers are now integrated into create_rf_bond_pads().
+        This function creates only the CPW sections between tapers and aperture.
         
         Args:
-            left_pad_right_x: x-coordinate of left pad's right edge
-            right_pad_left_x: x-coordinate of right pad's left edge
+            left_taper_end_x: x-coordinate where left taper ends (CPW starts)
+            right_taper_start_x: x-coordinate where right taper starts (CPW ends)
         """
         chip_cx = self.chip.chip_width / 2.0
         chip_cy = self.chip.chip_height / 2.0
         
-        # Calculate key x-positions
-        left_taper_start_x = left_pad_right_x
-        left_taper_end_x = left_taper_start_x + self.gold.cpw_taper_length
+        # CPW ends where the omega taper wide end starts (inset from aperture edge)
+        left_cpw_end_x = chip_cx - self.gold.aperture_radius - self.gold.omega_taper_cpw_inset
+        right_cpw_start_x = chip_cx + self.gold.aperture_radius + self.gold.omega_taper_cpw_inset
         
-        right_taper_end_x = right_pad_left_x
-        right_taper_start_x = right_taper_end_x - self.gold.cpw_taper_length
-        
-        # CPW ends at aperture edge
-        left_cpw_end_x = chip_cx - self.gold.aperture_radius
-        right_cpw_start_x = chip_cx + self.gold.aperture_radius
-        
-        # --- Left Taper (pad width → CPW width) ---
-        left_taper = pya.Polygon([
-            pya.Point(self._um_to_dbu(left_taper_start_x), 
-                     self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0)),
-            pya.Point(self._um_to_dbu(left_taper_start_x), 
-                     self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0)),
-            pya.Point(self._um_to_dbu(left_taper_end_x), 
-                     self._um_to_dbu(chip_cy + self.gold.cpw_signal_width / 2.0)),
-            pya.Point(self._um_to_dbu(left_taper_end_x), 
-                     self._um_to_dbu(chip_cy - self.gold.cpw_signal_width / 2.0)),
-        ])
-        cell.shapes(self.gold_layer_idx).insert(left_taper)
-        
-        # --- Left CPW section (taper to aperture) ---
+        # --- Left CPW section (from taper end to aperture) ---
         if left_cpw_end_x > left_taper_end_x:
             left_cpw = pya.Box(
                 self._um_to_dbu(left_taper_end_x),
@@ -244,7 +284,7 @@ class ChipDesigner:
             )
             cell.shapes(self.gold_layer_idx).insert(left_cpw)
         
-        # --- Right CPW section (aperture to taper) ---
+        # --- Right CPW section (from aperture to taper start) ---
         if right_cpw_start_x < right_taper_start_x:
             right_cpw = pya.Box(
                 self._um_to_dbu(right_cpw_start_x),
@@ -254,21 +294,46 @@ class ChipDesigner:
             )
             cell.shapes(self.gold_layer_idx).insert(right_cpw)
         
-        # --- Right Taper (CPW width → pad width) ---
-        right_taper = pya.Polygon([
-            pya.Point(self._um_to_dbu(right_taper_start_x), 
-                     self._um_to_dbu(chip_cy - self.gold.cpw_signal_width / 2.0)),
-            pya.Point(self._um_to_dbu(right_taper_start_x), 
-                     self._um_to_dbu(chip_cy + self.gold.cpw_signal_width / 2.0)),
-            pya.Point(self._um_to_dbu(right_taper_end_x), 
-                     self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0)),
-            pya.Point(self._um_to_dbu(right_taper_end_x), 
-                     self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0)),
-        ])
-        cell.shapes(self.gold_layer_idx).insert(right_taper)
-        
-        # --- Create 4 Omega Resonators in center ---
-        self.create_omega_resonators(cell, chip_cx, chip_cy)
+        # --- Create Omega Resonators in center (if any) ---
+        if self.gold.omega_count > 0:
+            self.create_omega_resonators(cell, chip_cx, chip_cy)
+        else:
+            # No omegas: draw tapers from CPW width that taper down and end
+            taper_length = self.gold.omega_taper_length
+            cpw_width = self.gold.cpw_signal_width
+            cpw_end_left = chip_cx - self.gold.aperture_radius
+            cpw_end_right = chip_cx + self.gold.aperture_radius
+            taper_end_width = 10.0  # um — taper narrows to this
+            
+            # Left taper (CPW → narrow end, pointing right)
+            left_taper_start_x = cpw_end_left - self.gold.omega_taper_cpw_inset
+            left_taper_end_x = left_taper_start_x + taper_length
+            left_taper = pya.Polygon([
+                pya.Point(self._um_to_dbu(left_taper_start_x),
+                         self._um_to_dbu(chip_cy - cpw_width / 2.0)),
+                pya.Point(self._um_to_dbu(left_taper_end_x),
+                         self._um_to_dbu(chip_cy - taper_end_width / 2.0)),
+                pya.Point(self._um_to_dbu(left_taper_end_x),
+                         self._um_to_dbu(chip_cy + taper_end_width / 2.0)),
+                pya.Point(self._um_to_dbu(left_taper_start_x),
+                         self._um_to_dbu(chip_cy + cpw_width / 2.0)),
+            ])
+            cell.shapes(self.gold_layer_idx).insert(left_taper)
+            
+            # Right taper (narrow end → CPW, pointing left)
+            right_taper_end_x = cpw_end_right + self.gold.omega_taper_cpw_inset
+            right_taper_start_x = right_taper_end_x - taper_length
+            right_taper = pya.Polygon([
+                pya.Point(self._um_to_dbu(right_taper_start_x),
+                         self._um_to_dbu(chip_cy - taper_end_width / 2.0)),
+                pya.Point(self._um_to_dbu(right_taper_end_x),
+                         self._um_to_dbu(chip_cy - cpw_width / 2.0)),
+                pya.Point(self._um_to_dbu(right_taper_end_x),
+                         self._um_to_dbu(chip_cy + cpw_width / 2.0)),
+                pya.Point(self._um_to_dbu(right_taper_start_x),
+                         self._um_to_dbu(chip_cy + taper_end_width / 2.0)),
+            ])
+            cell.shapes(self.gold_layer_idx).insert(right_taper)
     
     def create_omega_resonators(self, cell: pya.Cell, cx: float, cy: float) -> None:
         """
@@ -297,8 +362,8 @@ class ChipDesigner:
         # Distance from center to each ring center (along diagonal)
         offset = outer_radius + spacing
         
-        # Horizontal offset for top/bottom rings (for the gap alignment)
-        h_offset = self.gold.omega_lateral_offset
+        # Horizontal offset scales with outer_radius for proper alignment at all sizes
+        h_offset = outer_radius * 0.6
         
         # Four diagonal positions with horizontal offsets
         # Top rings offset left, bottom rings offset right
@@ -310,6 +375,10 @@ class ChipDesigner:
         ]
         
         num_segments = 64
+        
+        # Collect all omega geometry into a region, then cut gaps at the end
+        omega_region = pya.Region()
+        gap_boxes = []  # Store gap rectangles to subtract after all geometry is placed
         
         for ring_cx, ring_cy, ring_type in positions:
             # Create outer circle points
@@ -332,29 +401,24 @@ class ChipDesigner:
             inner_polygon = pya.Polygon(inner_points)
             inner_region = pya.Region(inner_polygon)
             
-            # Subtract inner from outer to create ring
-            ring_region = outer_region - inner_region
+            # Subtract inner from outer to create ring (no gap yet)
+            omega_region += outer_region - inner_region
             
-            # Create gap rectangle to break the loop
+            # Store gap rectangle for later subtraction
             if ring_type == 'top':
-                # Gap at top of ring
-                gap_box = pya.Box(
+                gap_boxes.append(pya.Box(
                     self._um_to_dbu(ring_cx - trace_gap / 2.0),
                     self._um_to_dbu(ring_cy),
                     self._um_to_dbu(ring_cx + trace_gap / 2.0),
                     self._um_to_dbu(ring_cy + outer_radius + trace_width)
-                )
+                ))
             else:
-                # Gap at bottom of ring
-                gap_box = pya.Box(
+                gap_boxes.append(pya.Box(
                     self._um_to_dbu(ring_cx - trace_gap / 2.0),
                     self._um_to_dbu(ring_cy - outer_radius - trace_width),
                     self._um_to_dbu(ring_cx + trace_gap / 2.0),
                     self._um_to_dbu(ring_cy)
-                )
-            
-            ring_region -= pya.Region(gap_box)
-            cell.shapes(self.gold_layer_idx).insert(ring_region)
+                ))
         
         # --- Signal Path (left to right): ---
         # 1. CPW left → UP+x to top-left omega
@@ -400,185 +464,282 @@ class ChipDesigner:
         
         # Tilt offset - how much x shifts per vertical distance
         tilt_x = h_offset  # Use same as horizontal offset for consistent angle
+        tw_dbu = self._um_to_dbu(trace_width)
+        
+        def make_path(x0, y0, x1, y1, extend=True):
+            """Create a path polygon from (x0,y0) to (x1,y1) with trace_width.
+            
+            Uses pya.Path with round ends and extends endpoints by trace_width/2
+            for robust overlap at connection points.
+            """
+            ext = self._um_to_dbu(trace_width / 2.0) if extend else 0
+            path = pya.Path([
+                pya.Point(self._um_to_dbu(x0), self._um_to_dbu(y0)),
+                pya.Point(self._um_to_dbu(x1), self._um_to_dbu(y1)),
+            ], tw_dbu, ext, ext)
+            return path
         
         # --- Connection 1: CPW left → UP+x to top-left omega INPUT (left side of gap) ---
-        # Starts at center level (cy), goes UP to top-left ring gap LEFT side, tilting +x
-        feed1_bottom_x = top_left_gap_center_x - gap_shift - tilt_x  # Bottom shifted -x (so going up shifts +x)
-        feed1_bottom_y = cy-trace_width/2
-        feed1_top_x = top_left_gap_center_x - gap_shift  # Left side of gap (input)
+        feed1_bottom_x = top_left_gap_center_x - gap_shift - tilt_x
+        feed1_bottom_y = cy
+        feed1_top_x = top_left_gap_center_x - gap_shift
         feed1_top_y = top_left_gap_y
-        
-        feed1_poly = pya.Polygon([
-            pya.Point(self._um_to_dbu(feed1_bottom_x - trace_width / 2.0), 
-                     self._um_to_dbu(feed1_bottom_y)),
-            pya.Point(self._um_to_dbu(feed1_bottom_x + trace_width / 2.0), 
-                     self._um_to_dbu(feed1_bottom_y)),
-            pya.Point(self._um_to_dbu(feed1_top_x + trace_width / 2.0), 
-                     self._um_to_dbu(feed1_top_y)),
-            pya.Point(self._um_to_dbu(feed1_top_x - trace_width / 2.0), 
-                     self._um_to_dbu(feed1_top_y)),
-        ])
-        cell.shapes(self.gold_layer_idx).insert(feed1_poly)
+        omega_region.insert(
+            make_path(feed1_bottom_x, feed1_bottom_y, feed1_top_x, feed1_top_y))
         
         # --- Connection 2: Top-left OUTPUT → DOWN+x to bottom-left INPUT (left pair) ---
-        # Goes from top-left ring gap RIGHT side DOWN to bottom-left ring gap LEFT side, tilting +x
-        conn2_top_x = top_left_gap_center_x + gap_shift  # Right side of top-left gap (output)
+        conn2_top_x = top_left_gap_center_x + gap_shift
         conn2_top_y = top_left_gap_y
-        conn2_bottom_x = bottom_left_gap_center_x - gap_shift  # Left side of bottom-left gap (input)
+        conn2_bottom_x = bottom_left_gap_center_x - gap_shift
         conn2_bottom_y = bottom_left_gap_y
-        
-        conn2_poly = pya.Polygon([
-            pya.Point(self._um_to_dbu(conn2_top_x - trace_width / 2.0), 
-                     self._um_to_dbu(conn2_top_y)),
-            pya.Point(self._um_to_dbu(conn2_top_x + trace_width / 2.0), 
-                     self._um_to_dbu(conn2_top_y)),
-            pya.Point(self._um_to_dbu(conn2_bottom_x + trace_width / 2.0), 
-                     self._um_to_dbu(conn2_bottom_y)),
-            pya.Point(self._um_to_dbu(conn2_bottom_x - trace_width / 2.0), 
-                     self._um_to_dbu(conn2_bottom_y)),
-        ])
-        cell.shapes(self.gold_layer_idx).insert(conn2_poly)
+        omega_region.insert(
+            make_path(conn2_top_x, conn2_top_y, conn2_bottom_x, conn2_bottom_y))
         
         # --- Connection 3: Bottom-left OUTPUT → UP+x to middle trace ---
-        # Goes from bottom-left ring gap RIGHT side UP to center level, tilting +x
-        feed3_bottom_x = bottom_left_gap_center_x + gap_shift  # Right side of gap (output)
+        feed3_bottom_x = bottom_left_gap_center_x + gap_shift
         feed3_bottom_y = bottom_left_gap_y
-        feed3_top_x = bottom_left_gap_center_x + gap_shift + tilt_x  # +x as we go up
-        feed3_top_y = cy+trace_width/2
-        
-        feed3_poly = pya.Polygon([
-            pya.Point(self._um_to_dbu(feed3_bottom_x - trace_width / 2.0), 
-                     self._um_to_dbu(feed3_bottom_y)),
-            pya.Point(self._um_to_dbu(feed3_bottom_x + trace_width / 2.0), 
-                     self._um_to_dbu(feed3_bottom_y)),
-            pya.Point(self._um_to_dbu(feed3_top_x + trace_width / 2.0), 
-                     self._um_to_dbu(feed3_top_y)),
-            pya.Point(self._um_to_dbu(feed3_top_x - trace_width / 2.0), 
-                     self._um_to_dbu(feed3_top_y)),
-        ])
-        cell.shapes(self.gold_layer_idx).insert(feed3_poly)
+        feed3_top_x = bottom_left_gap_center_x + gap_shift + tilt_x
+        feed3_top_y = cy
+        omega_region.insert(
+            make_path(feed3_bottom_x, feed3_bottom_y, feed3_top_x, feed3_top_y))
         
         # --- Connection 4: Middle trace → UP+x to top-right omega INPUT (left side of gap) ---
-        # Goes from center level UP to top-right ring gap LEFT side, tilting +x
-        feed4_bottom_x = top_right_gap_center_x - gap_shift - tilt_x  # -x at bottom (so going up shifts +x)
-        feed4_bottom_y = cy-trace_width/2
-        feed4_top_x = top_right_gap_center_x - gap_shift  # Left side of gap (input)
+        feed4_bottom_x = top_right_gap_center_x - gap_shift - tilt_x
+        feed4_bottom_y = cy
+        feed4_top_x = top_right_gap_center_x - gap_shift
         feed4_top_y = top_right_gap_y
-        
-        feed4_poly = pya.Polygon([
-            pya.Point(self._um_to_dbu(feed4_bottom_x - trace_width / 2.0), 
-                     self._um_to_dbu(feed4_bottom_y)),
-            pya.Point(self._um_to_dbu(feed4_bottom_x + trace_width / 2.0), 
-                     self._um_to_dbu(feed4_bottom_y)),
-            pya.Point(self._um_to_dbu(feed4_top_x + trace_width / 2.0), 
-                     self._um_to_dbu(feed4_top_y)),
-            pya.Point(self._um_to_dbu(feed4_top_x - trace_width / 2.0), 
-                     self._um_to_dbu(feed4_top_y)),
-        ])
-        cell.shapes(self.gold_layer_idx).insert(feed4_poly)
+        omega_region.insert(
+            make_path(feed4_bottom_x, feed4_bottom_y, feed4_top_x, feed4_top_y))
         
         # --- Connection 5: Top-right OUTPUT → DOWN+x to bottom-right INPUT (right pair) ---
-        # Goes from top-right ring gap RIGHT side DOWN to bottom-right ring gap LEFT side, tilting +x
-        conn5_top_x = top_right_gap_center_x + gap_shift  # Right side of top-right gap (output)
+        conn5_top_x = top_right_gap_center_x + gap_shift
         conn5_top_y = top_right_gap_y
-        conn5_bottom_x = bottom_right_gap_center_x - gap_shift  # Left side of bottom-right gap (input)
+        conn5_bottom_x = bottom_right_gap_center_x - gap_shift
         conn5_bottom_y = bottom_right_gap_y
-        
-        conn5_poly = pya.Polygon([
-            pya.Point(self._um_to_dbu(conn5_top_x - trace_width / 2.0), 
-                     self._um_to_dbu(conn5_top_y)),
-            pya.Point(self._um_to_dbu(conn5_top_x + trace_width / 2.0), 
-                     self._um_to_dbu(conn5_top_y)),
-            pya.Point(self._um_to_dbu(conn5_bottom_x + trace_width / 2.0), 
-                     self._um_to_dbu(conn5_bottom_y)),
-            pya.Point(self._um_to_dbu(conn5_bottom_x - trace_width / 2.0), 
-                     self._um_to_dbu(conn5_bottom_y)),
-        ])
-        cell.shapes(self.gold_layer_idx).insert(conn5_poly)
+        omega_region.insert(
+            make_path(conn5_top_x, conn5_top_y, conn5_bottom_x, conn5_bottom_y))
         
         # --- Connection 6: Bottom-right OUTPUT → UP+x to CPW right ---
-        # Goes from bottom-right ring gap RIGHT side UP to center level, tilting +x
-        feed6_bottom_x = bottom_right_gap_center_x + gap_shift  # Right side of gap (output)
+        feed6_bottom_x = bottom_right_gap_center_x + gap_shift
         feed6_bottom_y = bottom_right_gap_y
-        feed6_top_x = bottom_right_gap_center_x + gap_shift + tilt_x  # +x as we go up
-        feed6_top_y = cy+trace_width/2
-        
-        feed6_poly = pya.Polygon([
-            pya.Point(self._um_to_dbu(feed6_bottom_x - trace_width/2), 
-                     self._um_to_dbu(feed6_bottom_y)),
-            pya.Point(self._um_to_dbu(feed6_bottom_x + trace_width/2), 
-                     self._um_to_dbu(feed6_bottom_y)),
-            pya.Point(self._um_to_dbu(feed6_top_x + trace_width/2), 
-                     self._um_to_dbu(feed6_top_y)),
-            pya.Point(self._um_to_dbu(feed6_top_x - trace_width/2), 
-                     self._um_to_dbu(feed6_top_y)),
-        ])
-        cell.shapes(self.gold_layer_idx).insert(feed6_poly)
-        
-        # --- Horizontal connectors at center level ---
-        # Left CPW to feed1 bottom (overlaps with middle trace and feed1)
-        cpw_end_left = cx - self.gold.aperture_radius
-        left_cpw_box = pya.Box(
-            self._um_to_dbu(cpw_end_left),
-            self._um_to_dbu(cy - trace_width / 2.0),
-            self._um_to_dbu(feed1_bottom_x + trace_width / 2.0),
-            self._um_to_dbu(cy + trace_width / 2.0)
-        )
-        cell.shapes(self.gold_layer_idx).insert(left_cpw_box)
-        
-        # Right CPW from feed6 top (overlaps with feed6)
-        cpw_end_right = cx + self.gold.aperture_radius
-        right_cpw_box = pya.Box(
-            self._um_to_dbu(feed6_top_x - trace_width / 2.0),
-            self._um_to_dbu(cy - trace_width / 2.0),
-            self._um_to_dbu(cpw_end_right),
-            self._um_to_dbu(cy + trace_width / 2.0)
-        )
-        cell.shapes(self.gold_layer_idx).insert(right_cpw_box)
+        feed6_top_x = bottom_right_gap_center_x + gap_shift + tilt_x
+        feed6_top_y = cy
+        omega_region.insert(
+            make_path(feed6_bottom_x, feed6_bottom_y, feed6_top_x, feed6_top_y))
         
         # Middle connector (feed3 top to feed4 bottom at center level)
-        middle_conn_box = pya.Box(
-            self._um_to_dbu(feed3_top_x - trace_width / 2.0),
-            self._um_to_dbu(cy - trace_width / 2.0),
-            self._um_to_dbu(feed4_bottom_x + trace_width / 2.0),
-            self._um_to_dbu(cy + trace_width / 2.0)
-        )
-        cell.shapes(self.gold_layer_idx).insert(middle_conn_box)
+        omega_region.insert(
+            make_path(feed3_top_x, cy, feed4_bottom_x, cy))
         
         # --- Tapers from CPW signal width to omega trace width ---
+        # (The small cpw boxes that were here have been removed as they
+        # were overlapping with and redundant to these tapers)
         taper_length = self.gold.omega_taper_length
         cpw_width = self.gold.cpw_signal_width
+        cpw_end_left = cx - self.gold.aperture_radius
+        cpw_end_right = cx + self.gold.aperture_radius
         
         # Left taper (CPW → omega trace)
+        # Wide end starts inset into CPW, narrow end inside aperture
+        left_taper_start_x = cpw_end_left - self.gold.omega_taper_cpw_inset
+        left_taper_end_x = left_taper_start_x + taper_length
         left_taper = pya.Polygon([
-            pya.Point(self._um_to_dbu(cpw_end_left), 
+            pya.Point(self._um_to_dbu(left_taper_start_x), 
                      self._um_to_dbu(cy - cpw_width / 2.0)),
-            pya.Point(self._um_to_dbu(cpw_end_left + taper_length), 
+            pya.Point(self._um_to_dbu(left_taper_end_x), 
                      self._um_to_dbu(cy - trace_width / 2.0)),
-            pya.Point(self._um_to_dbu(cpw_end_left + taper_length), 
+            pya.Point(self._um_to_dbu(left_taper_end_x), 
                      self._um_to_dbu(cy + trace_width / 2.0)),
-            pya.Point(self._um_to_dbu(cpw_end_left), 
+            pya.Point(self._um_to_dbu(left_taper_start_x), 
                      self._um_to_dbu(cy + cpw_width / 2.0)),
         ])
-        cell.shapes(self.gold_layer_idx).insert(left_taper)
+        omega_region.insert(left_taper)
         
         # Right taper (omega trace → CPW)
+        # Narrow end inside aperture, wide end extends into CPW
+        right_taper_end_x = cpw_end_right + self.gold.omega_taper_cpw_inset
+        right_taper_start_x = right_taper_end_x - taper_length
         right_taper = pya.Polygon([
-            pya.Point(self._um_to_dbu(cpw_end_right - taper_length), 
+            pya.Point(self._um_to_dbu(right_taper_start_x), 
                      self._um_to_dbu(cy - trace_width / 2.0)),
-            pya.Point(self._um_to_dbu(cpw_end_right), 
+            pya.Point(self._um_to_dbu(right_taper_end_x), 
                      self._um_to_dbu(cy - cpw_width / 2.0)),
-            pya.Point(self._um_to_dbu(cpw_end_right), 
+            pya.Point(self._um_to_dbu(right_taper_end_x), 
                      self._um_to_dbu(cy + cpw_width / 2.0)),
-            pya.Point(self._um_to_dbu(cpw_end_right - taper_length), 
+            pya.Point(self._um_to_dbu(right_taper_start_x), 
                      self._um_to_dbu(cy + trace_width / 2.0)),
         ])
-        cell.shapes(self.gold_layer_idx).insert(right_taper)
+        omega_region.insert(right_taper)
+        
+        # --- Connecting wires from taper end to omega feed lines ---
+        # Extend trace_width/2 past the meeting point for good electrical contact
+        # Left: from taper narrow end past feed1 bottom position
+        left_wire_start_x = left_taper_end_x
+        left_wire_end_x = feed1_bottom_x + trace_width / 2.0
+        if left_wire_end_x > left_wire_start_x:
+            left_wire = pya.Box(
+                self._um_to_dbu(left_wire_start_x),
+                self._um_to_dbu(cy - trace_width / 2.0),
+                self._um_to_dbu(left_wire_end_x),
+                self._um_to_dbu(cy + trace_width / 2.0)
+            )
+            omega_region.insert(left_wire)
+        
+        # Right: from past feed6 top position to taper narrow end
+        right_wire_start_x = feed6_top_x - trace_width / 2.0
+        right_wire_end_x = right_taper_start_x
+        if right_wire_end_x > right_wire_start_x:
+            right_wire = pya.Box(
+                self._um_to_dbu(right_wire_start_x),
+                self._um_to_dbu(cy - trace_width / 2.0),
+                self._um_to_dbu(right_wire_end_x),
+                self._um_to_dbu(cy + trace_width / 2.0)
+            )
+            omega_region.insert(right_wire)
+        
+        # --- Final step: subtract gap rectangles AFTER all geometry is placed ---
+        # This guarantees clean rectangular gaps regardless of path extensions
+        omega_region.merge()
+        for gap_box in gap_boxes:
+            omega_region -= pya.Region(gap_box)
+        
+        cell.shapes(self.gold_layer_idx).insert(omega_region)
     
-    def create_dc_contacts(self, cell: pya.Cell, y_offset: float) -> None:
-        """Create DC contact pad array on gold layer."""
-        # TODO: Implement DC contact pads
-        pass
+    def _dc_pad_geometry(self, sign: float) -> list:
+        """
+        Compute DC pad positions and feedline routing for one side.
+        
+        Path per pad: pad → taper → angled feedline → vertical feedline →
+                      vertical through aperture → straight run → fan-out
+        
+        Args:
+            sign: +1 for top side, -1 for bottom side
+            
+        Returns:
+            List of dicts, one per pad, with keys:
+                pad_cx, pad_cy, taper_start_y,
+                taper_end_x, taper_end_y,
+                vertical_x, vertical_y,    (where angled becomes vertical)
+                aperture_y,                (aperture edge crossing)
+                fanout_start_y,            (end of straight run, start of fan-out)
+                fanout_x, fanout_y         (fan-out tip)
+        """
+        chip_cx = self.chip.chip_width / 2.0
+        chip_cy = self.chip.chip_height / 2.0
+        g = self.gold
+        n = g.dc_pad_count
+        r = g.aperture_radius
+        
+        tan_a = math.tan(math.radians(g.dc_taper_angle))
+        
+        pads = []
+        for i in range(n):
+            idx = i - (n - 1) / 2.0  # centered index
+            pad_cx = chip_cx + idx * g.dc_pad_pitch
+            
+            # Stagger: outer pads shift toward chip center
+            frac = abs(idx) / ((n - 1) / 2.0)
+            pad_cy_abs = g.dc_pad_cy - frac * g.dc_pad_stagger
+            pad_cy = chip_cy + sign * pad_cy_abs
+            
+            # Taper: pad inner edge → feedline width
+            taper_start_y = pad_cy - sign * g.dc_pad_height / 2.0
+            taper_dx = g.dc_taper_height * tan_a
+            taper_end_x = pad_cx - math.copysign(taper_dx, pad_cx - chip_cx)
+            taper_end_y = taper_start_y - sign * g.dc_taper_height
+            
+            # Vertical transition point: feedline goes vertical at this height
+            vertical_x = chip_cx + idx * g.dc_feedline_pitch
+            vertical_y = chip_cy + sign * g.dc_feedline_vertical_cy
+            
+            # Aperture edge crossing (vertical feedline)
+            aperture_y = chip_cy + sign * r
+            
+            # Straight vertical run inside aperture before fan-out
+            fanout_start_y = chip_cy + sign * (r - g.dc_fanout_straight)
+            
+            # Fan-out tip
+            fanout_x = chip_cx + idx * g.dc_fanout_pitch
+            fanout_y = chip_cy + sign * (r - g.dc_fanout_height)
+            
+            pads.append(dict(
+                pad_cx=pad_cx, pad_cy=pad_cy,
+                taper_start_y=taper_start_y,
+                taper_end_x=taper_end_x, taper_end_y=taper_end_y,
+                vertical_x=vertical_x, vertical_y=vertical_y,
+                aperture_y=aperture_y,
+                fanout_start_y=fanout_start_y,
+                fanout_x=fanout_x, fanout_y=fanout_y,
+            ))
+        return pads
+    
+    def create_dc_access_pads(self, cell: pya.Cell) -> None:
+        """
+        Create DC bond pads, tapers, feedlines, and fan-outs on both sides.
+        
+        For each pad (per side):
+          1. Rectangular bond pad at (pad_cx, pad_cy)
+          2. Trapezoidal taper from pad width → feedline width
+          3. Angled feedline from taper tip → vertical transition point
+          4. Vertical feedline from transition → through aperture → straight run
+          5. Fan-out segment from straight run end → fan-out tip
+        """
+        g = self.gold
+        fw = g.dc_feedline_width
+        
+        for sign in [+1, -1]:
+            for p in self._dc_pad_geometry(sign):
+                # 1. Bond pad
+                cell.shapes(self.gold_layer_idx).insert(pya.Box(
+                    self._um_to_dbu(p['pad_cx'] - g.dc_pad_width / 2.0),
+                    self._um_to_dbu(p['pad_cy'] - g.dc_pad_height / 2.0),
+                    self._um_to_dbu(p['pad_cx'] + g.dc_pad_width / 2.0),
+                    self._um_to_dbu(p['pad_cy'] + g.dc_pad_height / 2.0)
+                ))
+                
+                # 2. Taper (pad width → feedline width)
+                cell.shapes(self.gold_layer_idx).insert(pya.Polygon([
+                    pya.Point(self._um_to_dbu(p['pad_cx'] - g.dc_pad_width / 2.0),
+                             self._um_to_dbu(p['taper_start_y'])),
+                    pya.Point(self._um_to_dbu(p['pad_cx'] + g.dc_pad_width / 2.0),
+                             self._um_to_dbu(p['taper_start_y'])),
+                    pya.Point(self._um_to_dbu(p['taper_end_x'] + fw / 2.0),
+                             self._um_to_dbu(p['taper_end_y'])),
+                    pya.Point(self._um_to_dbu(p['taper_end_x'] - fw / 2.0),
+                             self._um_to_dbu(p['taper_end_y'])),
+                ]))
+                
+                # 3. Angled feedline (taper tip → vertical transition)
+                cell.shapes(self.gold_layer_idx).insert(pya.Polygon([
+                    pya.Point(self._um_to_dbu(p['taper_end_x'] - fw / 2.0),
+                             self._um_to_dbu(p['taper_end_y'])),
+                    pya.Point(self._um_to_dbu(p['taper_end_x'] + fw / 2.0),
+                             self._um_to_dbu(p['taper_end_y'])),
+                    pya.Point(self._um_to_dbu(p['vertical_x'] + fw / 2.0),
+                             self._um_to_dbu(p['vertical_y'])),
+                    pya.Point(self._um_to_dbu(p['vertical_x'] - fw / 2.0),
+                             self._um_to_dbu(p['vertical_y'])),
+                ]))
+                
+                # 4. Vertical feedline (transition → through aperture → straight run)
+                cell.shapes(self.gold_layer_idx).insert(pya.Box(
+                    self._um_to_dbu(p['vertical_x'] - fw / 2.0),
+                    self._um_to_dbu(min(p['vertical_y'], p['fanout_start_y'])),
+                    self._um_to_dbu(p['vertical_x'] + fw / 2.0),
+                    self._um_to_dbu(max(p['vertical_y'], p['fanout_start_y']))
+                ))
+                
+                # 5. Fan-out (straight run end → fan-out tip)
+                cell.shapes(self.gold_layer_idx).insert(pya.Polygon([
+                    pya.Point(self._um_to_dbu(p['vertical_x'] - fw / 2.0),
+                             self._um_to_dbu(p['fanout_start_y'])),
+                    pya.Point(self._um_to_dbu(p['vertical_x'] + fw / 2.0),
+                             self._um_to_dbu(p['fanout_start_y'])),
+                    pya.Point(self._um_to_dbu(p['fanout_x'] + fw / 2.0),
+                             self._um_to_dbu(p['fanout_y'])),
+                    pya.Point(self._um_to_dbu(p['fanout_x'] - fw / 2.0),
+                             self._um_to_dbu(p['fanout_y'])),
+                ]))
     
     def create_ground_plane(self, cell: pya.Cell) -> None:
         """
@@ -605,106 +766,269 @@ class ChipDesigner:
         ))
         
         # === SUBTRACT RF BOND PADS WITH CLEARANCE ===
-        # Left pad position
+        # Left pad position - clearance box stops at pad edge (taper clearance handled separately)
+        # Outer edge has extra 50 um clearance
         left_pad_x = self.gold.edge_buffer
         left_pad_box = pya.Box(
-            self._um_to_dbu(left_pad_x - pad_clearance),
+            self._um_to_dbu(left_pad_x - pad_clearance - 50.0),
             self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0 - pad_clearance),
-            self._um_to_dbu(left_pad_x + self.gold.rf_pad_height + pad_clearance),
+            self._um_to_dbu(left_pad_x + self.gold.rf_pad_height),  # Stop at pad edge
             self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0 + pad_clearance)
         )
         ground_region -= pya.Region(left_pad_box)
         
-        # Right pad position
+        # Right pad position - clearance box stops at pad edge
+        # Outer edge has extra 50 um clearance
         right_pad_x = self.chip.chip_width - self.gold.edge_buffer - self.gold.rf_pad_height
         right_pad_box = pya.Box(
-            self._um_to_dbu(right_pad_x - pad_clearance),
+            self._um_to_dbu(right_pad_x),  # Stop at pad edge
             self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0 - pad_clearance),
-            self._um_to_dbu(right_pad_x + self.gold.rf_pad_height + pad_clearance),
+            self._um_to_dbu(right_pad_x + self.gold.rf_pad_height + pad_clearance + 50.0),
             self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0 + pad_clearance)
         )
         ground_region -= pya.Region(right_pad_box)
         
         # === SUBTRACT LEFT TAPER GAP (pad width → CPW width) ===
-        # Start taper at pad edge (aligned with signal taper)
+        # Calculate perpendicular offset for constant gap normal to taper edge
         left_taper_start_x = left_pad_x + self.gold.rf_pad_height
         left_taper_end_x = left_taper_start_x + self.gold.cpw_taper_length
         
-        # Top gap taper (wide at pad, narrow at CPW)
-        left_gap_top = pya.Polygon([
+        # Taper edge vector (top edge, from wide to narrow)
+        taper_dx = self.gold.cpw_taper_length
+        taper_dy = (self.gold.cpw_signal_width - self.gold.rf_pad_width) / 2.0  # negative (narrows)
+        taper_length = math.sqrt(taper_dx**2 + taper_dy**2)
+        
+        # Perpendicular unit vector (outward from top edge)
+        # Rotate taper vector 90° CCW: (dx, dy) → (-dy, dx), then normalize
+        perp_x = -taper_dy / taper_length
+        perp_y = taper_dx / taper_length
+        
+        # Perpendicular offset for pad_clearance gap
+        offset_x = pad_clearance * perp_x
+        offset_y = pad_clearance * perp_y
+        
+        # Single tapered cutout for signal + gap (top half)
+        # 5-point polygon: meets pad clearance horizontal line at pad edge,
+        # follows angled outer edge (parallel to signal taper at pad_clearance),
+        # then returns along signal taper inner edge back to pad
+        left_taper_cutout_top = pya.Polygon([
+            # Pad edge at pad clearance Y (meets horizontal pad clearance line)
             pya.Point(self._um_to_dbu(left_taper_start_x),
                      self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0 + pad_clearance)),
-            pya.Point(self._um_to_dbu(left_taper_end_x),
-                     self._um_to_dbu(chip_cy + self.gold.cpw_signal_width / 2.0 + gap)),
+            # Outer edge at pad end (perpendicular offset from signal taper corner)
+            pya.Point(self._um_to_dbu(left_taper_start_x + offset_x),
+                     self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0 + offset_y)),
+            # Outer edge at CPW end (perpendicular offset)
+            pya.Point(self._um_to_dbu(left_taper_end_x + offset_x),
+                     self._um_to_dbu(chip_cy + self.gold.cpw_signal_width / 2.0 + offset_y)),
+            # Inner edge at CPW end (signal taper edge)
             pya.Point(self._um_to_dbu(left_taper_end_x),
                      self._um_to_dbu(chip_cy + self.gold.cpw_signal_width / 2.0)),
+            # Inner edge at pad end (signal taper edge = bond pad edge)
             pya.Point(self._um_to_dbu(left_taper_start_x),
                      self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0)),
         ])
-        ground_region -= pya.Region(left_gap_top)
+        ground_region -= pya.Region(left_taper_cutout_top)
         
-        # Bottom gap taper (symmetric)
-        left_gap_bot = pya.Polygon([
+        # Single tapered cutout for signal + gap (bottom half)
+        left_taper_cutout_bot = pya.Polygon([
+            # Pad edge at pad clearance Y (meets horizontal pad clearance line)
             pya.Point(self._um_to_dbu(left_taper_start_x),
                      self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0 - pad_clearance)),
-            pya.Point(self._um_to_dbu(left_taper_end_x),
-                     self._um_to_dbu(chip_cy - self.gold.cpw_signal_width / 2.0 - gap)),
+            # Outer edge at pad end (perpendicular offset from signal taper corner)
+            pya.Point(self._um_to_dbu(left_taper_start_x + offset_x),
+                     self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0 - offset_y)),
+            # Outer edge at CPW end (perpendicular offset)
+            pya.Point(self._um_to_dbu(left_taper_end_x + offset_x),
+                     self._um_to_dbu(chip_cy - self.gold.cpw_signal_width / 2.0 - offset_y)),
+            # Inner edge at CPW end (signal taper edge)
             pya.Point(self._um_to_dbu(left_taper_end_x),
                      self._um_to_dbu(chip_cy - self.gold.cpw_signal_width / 2.0)),
+            # Inner edge at pad end (signal taper edge = bond pad edge)
             pya.Point(self._um_to_dbu(left_taper_start_x),
                      self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0)),
         ])
-        ground_region -= pya.Region(left_gap_bot)
+        ground_region -= pya.Region(left_taper_cutout_bot)
         
         # === SUBTRACT LEFT CPW SECTION (taper end to aperture) ===
         cpw_end_left = chip_cx - self.gold.aperture_radius
+        # Extend cutout past aperture radius to fully overlap with circle edge
+        # At CPW gap height h, circle edge is at x = sqrt(r^2 - h^2) from center,
+        # so we need to extend by r - sqrt(r^2 - h^2) to ensure full overlap
+        cpw_half_height = self.gold.cpw_signal_width / 2.0 + gap
+        r = self.gold.aperture_radius
+        circle_inset = r - math.sqrt(r**2 - cpw_half_height**2)
         left_cpw_box = pya.Box(
             self._um_to_dbu(left_taper_end_x),
-            self._um_to_dbu(chip_cy - self.gold.cpw_signal_width / 2.0 - gap),
-            self._um_to_dbu(cpw_end_left),
-            self._um_to_dbu(chip_cy + self.gold.cpw_signal_width / 2.0 + gap)
+            self._um_to_dbu(chip_cy - cpw_half_height),
+            self._um_to_dbu(cpw_end_left + circle_inset),
+            self._um_to_dbu(chip_cy + cpw_half_height)
         )
         ground_region -= pya.Region(left_cpw_box)
         
         # === SUBTRACT RIGHT CPW SECTION (aperture to taper) ===
         cpw_end_right = chip_cx + self.gold.aperture_radius
-        # Taper ends at pad edge (aligned with signal taper)
+        # Taper gap aligns with signal taper (ends at pad edge)
         right_taper_end_x = self.chip.chip_width - self.gold.edge_buffer - self.gold.rf_pad_height
         right_taper_start_x = right_taper_end_x - self.gold.cpw_taper_length
         right_cpw_box = pya.Box(
-            self._um_to_dbu(cpw_end_right),
-            self._um_to_dbu(chip_cy - self.gold.cpw_signal_width / 2.0 - gap),
+            self._um_to_dbu(cpw_end_right - circle_inset),
+            self._um_to_dbu(chip_cy - cpw_half_height),
             self._um_to_dbu(right_taper_start_x),
-            self._um_to_dbu(chip_cy + self.gold.cpw_signal_width / 2.0 + gap)
+            self._um_to_dbu(chip_cy + cpw_half_height)
         )
         ground_region -= pya.Region(right_cpw_box)
         
         # === SUBTRACT RIGHT TAPER GAP (CPW width → pad width) ===
-        # Top gap taper (narrow at CPW, wide at pad)
-        right_gap_top = pya.Polygon([
-            pya.Point(self._um_to_dbu(right_taper_start_x),
-                     self._um_to_dbu(chip_cy + self.gold.cpw_signal_width / 2.0 + gap)),
-            pya.Point(self._um_to_dbu(right_taper_end_x),
-                     self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0 + pad_clearance)),
-            pya.Point(self._um_to_dbu(right_taper_end_x),
-                     self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0)),
+        # Calculate perpendicular offset (same geometry, mirrored)
+        # Right taper edge vector (top edge, from narrow to wide)
+        right_taper_dx = self.gold.cpw_taper_length
+        right_taper_dy = (self.gold.rf_pad_width - self.gold.cpw_signal_width) / 2.0  # positive (widens)
+        right_taper_length = math.sqrt(right_taper_dx**2 + right_taper_dy**2)
+        
+        # Perpendicular unit vector (outward from top edge)
+        right_perp_x = right_taper_dy / right_taper_length
+        right_perp_y = right_taper_dx / right_taper_length
+        
+        # Perpendicular offset for pad_clearance gap
+        right_offset_x = pad_clearance * right_perp_x
+        right_offset_y = pad_clearance * right_perp_y
+        
+        # Single tapered cutout for signal + gap (top half)
+        # 5-point polygon: meets pad clearance horizontal line at pad edge,
+        # follows angled outer edge, returns along signal taper inner edge
+        right_taper_cutout_top = pya.Polygon([
+            # Inner edge at CPW end (signal taper edge)
             pya.Point(self._um_to_dbu(right_taper_start_x),
                      self._um_to_dbu(chip_cy + self.gold.cpw_signal_width / 2.0)),
+            # Outer edge at CPW end (perpendicular offset)
+            pya.Point(self._um_to_dbu(right_taper_start_x - right_offset_x),
+                     self._um_to_dbu(chip_cy + self.gold.cpw_signal_width / 2.0 + right_offset_y)),
+            # Outer edge at pad end (perpendicular offset from signal taper corner)
+            pya.Point(self._um_to_dbu(right_taper_end_x - right_offset_x),
+                     self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0 + right_offset_y)),
+            # Pad edge at pad clearance Y (meets horizontal pad clearance line)
+            pya.Point(self._um_to_dbu(right_taper_end_x),
+                     self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0 + pad_clearance)),
+            # Inner edge at pad end (signal taper edge = bond pad edge)
+            pya.Point(self._um_to_dbu(right_taper_end_x),
+                     self._um_to_dbu(chip_cy + self.gold.rf_pad_width / 2.0)),
         ])
-        ground_region -= pya.Region(right_gap_top)
+        ground_region -= pya.Region(right_taper_cutout_top)
         
-        # Bottom gap taper (symmetric)
-        right_gap_bot = pya.Polygon([
-            pya.Point(self._um_to_dbu(right_taper_start_x),
-                     self._um_to_dbu(chip_cy - self.gold.cpw_signal_width / 2.0 - gap)),
-            pya.Point(self._um_to_dbu(right_taper_end_x),
-                     self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0 - pad_clearance)),
-            pya.Point(self._um_to_dbu(right_taper_end_x),
-                     self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0)),
+        # Single tapered cutout for signal + gap (bottom half)
+        right_taper_cutout_bot = pya.Polygon([
+            # Inner edge at CPW end (signal taper edge)
             pya.Point(self._um_to_dbu(right_taper_start_x),
                      self._um_to_dbu(chip_cy - self.gold.cpw_signal_width / 2.0)),
+            # Outer edge at CPW end (perpendicular offset)
+            pya.Point(self._um_to_dbu(right_taper_start_x - right_offset_x),
+                     self._um_to_dbu(chip_cy - self.gold.cpw_signal_width / 2.0 - right_offset_y)),
+            # Outer edge at pad end (perpendicular offset from signal taper corner)
+            pya.Point(self._um_to_dbu(right_taper_end_x - right_offset_x),
+                     self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0 - right_offset_y)),
+            # Pad edge at pad clearance Y (meets horizontal pad clearance line)
+            pya.Point(self._um_to_dbu(right_taper_end_x),
+                     self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0 - pad_clearance)),
+            # Inner edge at pad end (signal taper edge = bond pad edge)
+            pya.Point(self._um_to_dbu(right_taper_end_x),
+                     self._um_to_dbu(chip_cy - self.gold.rf_pad_width / 2.0)),
         ])
-        ground_region -= pya.Region(right_gap_bot)
+        ground_region -= pya.Region(right_taper_cutout_bot)
+        
+        # === SUBTRACT DC CUTOUT + FEEDLINE CLEARANCE CHANNELS ===
+        g = self.gold
+        fw = g.dc_feedline_width
+        clr = g.dc_feedline_clearance
+        
+        # Cutout taper: from dc_cutout_width at the rectangle inner edge,
+        # taper at dc_cutout_taper_angle until reaching ±dc_cutout_aperture_width/2,
+        # then go vertical to the aperture edge. Past the aperture edge, add
+        # a rectangular extension (fanout_height + fanout_straight) deep to
+        # fully clear the opening for DC lines.
+        aw_half = g.dc_cutout_aperture_width / 2.0
+        tan_cut = math.tan(math.radians(g.dc_cutout_taper_angle))
+        # Vertical distance for taper to narrow from cutout_width/2 to aperture_width/2
+        dx_taper = g.dc_cutout_width / 2.0 - aw_half
+        taper_dy = dx_taper / tan_cut if tan_cut > 0 else 0
+        extension = g.dc_fanout_height + g.dc_fanout_straight
+        
+        for sign in [+1, -1]:  # +1 = top, -1 = bottom
+            cutout_cy = chip_cy + sign * g.dc_cutout_cy
+            
+            # Rectangular cutout
+            ground_region -= pya.Region(pya.Box(
+                self._um_to_dbu(chip_cx - g.dc_cutout_width / 2.0),
+                self._um_to_dbu(cutout_cy - g.dc_cutout_height / 2.0),
+                self._um_to_dbu(chip_cx + g.dc_cutout_width / 2.0),
+                self._um_to_dbu(cutout_cy + g.dc_cutout_height / 2.0)
+            ))
+            
+            # Trapezoidal taper: cutout inner edge → aperture_width
+            cutout_inner_y = cutout_cy - sign * g.dc_cutout_height / 2.0
+            taper_end_y = cutout_inner_y - sign * taper_dy
+            ground_region -= pya.Region(pya.Polygon([
+                pya.Point(self._um_to_dbu(chip_cx - g.dc_cutout_width / 2.0),
+                         self._um_to_dbu(cutout_inner_y)),
+                pya.Point(self._um_to_dbu(chip_cx + g.dc_cutout_width / 2.0),
+                         self._um_to_dbu(cutout_inner_y)),
+                pya.Point(self._um_to_dbu(chip_cx + aw_half),
+                         self._um_to_dbu(taper_end_y)),
+                pya.Point(self._um_to_dbu(chip_cx - aw_half),
+                         self._um_to_dbu(taper_end_y)),
+            ]))
+            
+            # Vertical section: aperture_width straight down to aperture edge
+            aperture_edge_y = chip_cy + sign * r
+            ground_region -= pya.Region(pya.Box(
+                self._um_to_dbu(chip_cx - aw_half),
+                self._um_to_dbu(min(taper_end_y, aperture_edge_y)),
+                self._um_to_dbu(chip_cx + aw_half),
+                self._um_to_dbu(max(taper_end_y, aperture_edge_y))
+            ))
+            
+            # Extension past aperture edge to clear out fanout region
+            ext_y = aperture_edge_y - sign * extension
+            ground_region -= pya.Region(pya.Box(
+                self._um_to_dbu(chip_cx - aw_half),
+                self._um_to_dbu(min(aperture_edge_y, ext_y)),
+                self._um_to_dbu(chip_cx + aw_half),
+                self._um_to_dbu(max(aperture_edge_y, ext_y))
+            ))
+            
+            # Feedline clearance channels (mirrors create_dc_access_pads + clearance)
+            for p in self._dc_pad_geometry(sign):
+                # Taper clearance
+                ground_region -= pya.Region(pya.Polygon([
+                    pya.Point(self._um_to_dbu(p['pad_cx'] - g.dc_pad_width / 2.0 - clr),
+                             self._um_to_dbu(p['taper_start_y'])),
+                    pya.Point(self._um_to_dbu(p['pad_cx'] + g.dc_pad_width / 2.0 + clr),
+                             self._um_to_dbu(p['taper_start_y'])),
+                    pya.Point(self._um_to_dbu(p['taper_end_x'] + fw / 2.0 + clr),
+                             self._um_to_dbu(p['taper_end_y'])),
+                    pya.Point(self._um_to_dbu(p['taper_end_x'] - fw / 2.0 - clr),
+                             self._um_to_dbu(p['taper_end_y'])),
+                ]))
+                
+                # Angled feedline clearance (taper tip → vertical transition)
+                ground_region -= pya.Region(pya.Polygon([
+                    pya.Point(self._um_to_dbu(p['taper_end_x'] - fw / 2.0 - clr),
+                             self._um_to_dbu(p['taper_end_y'])),
+                    pya.Point(self._um_to_dbu(p['taper_end_x'] + fw / 2.0 + clr),
+                             self._um_to_dbu(p['taper_end_y'])),
+                    pya.Point(self._um_to_dbu(p['vertical_x'] + fw / 2.0 + clr),
+                             self._um_to_dbu(p['vertical_y'])),
+                    pya.Point(self._um_to_dbu(p['vertical_x'] - fw / 2.0 - clr),
+                             self._um_to_dbu(p['vertical_y'])),
+                ]))
+                
+                # Vertical feedline clearance (transition → through aperture → fanout tip)
+                ground_region -= pya.Region(pya.Box(
+                    self._um_to_dbu(p['vertical_x'] - fw / 2.0 - clr),
+                    self._um_to_dbu(min(p['vertical_y'], p['fanout_y'])),
+                    self._um_to_dbu(p['vertical_x'] + fw / 2.0 + clr),
+                    self._um_to_dbu(max(p['vertical_y'], p['fanout_y']))
+                ))
         
         # === SUBTRACT CENTRAL APERTURE (circular) ===
         num_segments = 128
@@ -717,27 +1041,313 @@ class ChipDesigner:
         aperture_polygon = pya.Polygon(aperture_points)
         ground_region -= pya.Region(aperture_polygon)
         
+        # === SUBTRACT ALIGNMENT MARK CLEARANCES ===
+        am_off = self.gold.alignment_mark_offset
+        am_size = self.gold.alignment_mark_size
+        am_clr = self.gold.rf_pad_clearance  # reuse pad clearance
+        for sx in [+1, -1]:
+            for sy in [+1, -1]:
+                mx = chip_cx + sx * am_off
+                my = chip_cy + sy * am_off
+                ground_region -= pya.Region(pya.Box(
+                    self._um_to_dbu(mx - am_size / 2.0 - am_clr),
+                    self._um_to_dbu(my - am_size / 2.0 - am_clr),
+                    self._um_to_dbu(mx + am_size / 2.0 + am_clr),
+                    self._um_to_dbu(my + am_size / 2.0 + am_clr)
+                ))
+        
+        # === SUBTRACT PRT THERMOMETER CLEARANCES ===
+        prt_clr = 50.0  # um clearance around PRT features
+        for sign in [+1, -1]:
+            prt_cx = chip_cx
+            prt_cy = chip_cy + sign * self.platinum.prt_cy
+            ground_region -= pya.Region(pya.Box(
+                self._um_to_dbu(prt_cx - self.platinum.prt_width / 2.0 - prt_clr),
+                self._um_to_dbu(prt_cy - self.platinum.prt_height / 2.0 - prt_clr),
+                self._um_to_dbu(prt_cx + self.platinum.prt_width / 2.0 + prt_clr),
+                self._um_to_dbu(prt_cy + self.platinum.prt_height / 2.0 + prt_clr)
+            ))
+        
+        # === SUBTRACT VERNIER ALIGNMENT MARK CLEARANCE ===
+        vernier_clr = 50.0  # µm clearance around vernier marks
+        vx = chip_cx + 2700.0
+        vy = chip_cy + 1500.0
+        # Vernier combined bbox (from imported GDS): ~340 × 275 µm centered at mark origin
+        v_hw = 170.0  # half-width
+        v_hh = 170.0  # half-height (use symmetric envelope)
+        ground_region -= pya.Region(pya.Box(
+            self._um_to_dbu(vx - v_hw - vernier_clr),
+            self._um_to_dbu(vy - v_hh - vernier_clr),
+            self._um_to_dbu(vx + v_hw + vernier_clr),
+            self._um_to_dbu(vy + v_hh + vernier_clr)
+        ))
+        
         # Merge and insert ground plane
         ground_region.merge()
         cell.shapes(self.gold_layer_idx).insert(ground_region)
+    
+    def create_alignment_marks(self, cell: pya.Cell) -> None:
+        """
+        Create cross-shaped alignment marks at ±offset, ±offset from chip center.
+        
+        Each mark is two overlapping rectangles forming a + shape.
+        """
+        chip_cx = self.chip.chip_width / 2.0
+        chip_cy = self.chip.chip_height / 2.0
+        off = self.gold.alignment_mark_offset
+        size = self.gold.alignment_mark_size
+        w = self.gold.alignment_mark_width
+        
+        for sx in [+1, -1]:
+            for sy in [+1, -1]:
+                cx = chip_cx + sx * off
+                cy = chip_cy + sy * off
+                
+                # Horizontal bar
+                cell.shapes(self.gold_layer_idx).insert(pya.Box(
+                    self._um_to_dbu(cx - size / 2.0),
+                    self._um_to_dbu(cy - w / 2.0),
+                    self._um_to_dbu(cx + size / 2.0),
+                    self._um_to_dbu(cy + w / 2.0)
+                ))
+                
+                # Vertical bar
+                cell.shapes(self.gold_layer_idx).insert(pya.Box(
+                    self._um_to_dbu(cx - w / 2.0),
+                    self._um_to_dbu(cy - size / 2.0),
+                    self._um_to_dbu(cx + w / 2.0),
+                    self._um_to_dbu(cy + size / 2.0)
+                ))
+    
+    def create_vernier_marks(self, cell: pya.Cell) -> None:
+        """Import vernier/alignment marks from external GDS onto each chip.
+        
+        Reads Contact-AlignMarks_Vernier_DemisDJohn_v5.gds:
+          - AlignLyr1 (layer 1/0) → gold layer
+          - AlignLyr2 (layer 2/0) → platinum layer
+        
+        Placed at chip_center + (2700, 1500) µm.
+        Ground plane cutout is handled in create_ground_plane().
+        """
+        gds_path = os.path.join(
+            os.path.dirname(__file__),
+            "Contact-AlignMarks_Vernier_DemisDJohn_v5.gds"
+        )
+        
+        # Load external GDS
+        ext_layout = pya.Layout()
+        ext_layout.read(gds_path)
+        
+        align_lyr1_src = ext_layout.cell("AlignLyr1")
+        align_lyr2_src = ext_layout.cell("AlignLyr2")
+        
+        if align_lyr1_src is None or align_lyr2_src is None:
+            print("  WARNING: Could not find AlignLyr1/AlignLyr2 in alignment GDS")
+            return
+        
+        ext_gold_idx = ext_layout.layer(pya.LayerInfo(1, 0))
+        ext_plat_idx = ext_layout.layer(pya.LayerInfo(2, 0))
+        
+        # Collect flattened geometry from each source cell
+        gold_region = pya.Region(align_lyr1_src.begin_shapes_rec(ext_gold_idx))
+        plat_region = pya.Region(align_lyr2_src.begin_shapes_rec(ext_plat_idx))
+        
+        # Placement position (chip-local coordinates)
+        chip_cx = self.chip.chip_width / 2.0
+        chip_cy = self.chip.chip_height / 2.0
+        vx = chip_cx + 2700.0
+        vy = chip_cy + 1500.0
+        
+        # Translate to placement position and insert
+        shift = pya.ICplxTrans(1, 0, False,
+                               self._um_to_dbu(vx), self._um_to_dbu(vy))
+        cell.shapes(self.gold_layer_idx).insert(gold_region.transformed(shift))
+        cell.shapes(self.platinum_layer_idx).insert(plat_region.transformed(shift))
     
     # -------------------------------------------------------------------------
     # PLATINUM LAYER COMPONENTS
     # -------------------------------------------------------------------------
     
-    def create_prt_thermometer(self, cell: pya.Cell, y_offset: float) -> None:
-        """Create PRT serpentine thermometer on platinum layer."""
-        # TODO: Implement PRT thermometer
-        pass
+    def create_prt_thermometers(self, cell: pya.Cell) -> None:
+        """
+        Create PRT serpentine thermometers on the platinum layer.
+        
+        Placed at chip center X, at ±prt_cy from chip center Y.
+        Each thermometer: pad | serpentine body | pad
+        Serpentine consists of horizontal lines snaking back and forth.
+        """
+        p = self.platinum
+        chip_cx = self.chip.chip_width / 2.0
+        chip_cy = self.chip.chip_height / 2.0
+        
+        tw = p.prt_trace_width
+        ts = p.prt_trace_spacing
+        pitch = tw + ts  # centerline-to-centerline
+        
+        # Body dimensions (between the two pads)
+        body_width = p.prt_width - 2.0 * p.prt_pad_width
+        
+        # Number of horizontal traces that fit in the height
+        n_lines = int(p.prt_height // pitch)
+        # Center the serpentine vertically within prt_height
+        serpentine_total = n_lines * tw + (n_lines - 1) * ts
+        y_margin = (p.prt_height - serpentine_total) / 2.0
+        
+        ps = p.prt_pad_spacing  # gap between Au pad edge and Pt serpentine
+        
+        for sign in [+1, -1]:
+            # Feature center
+            feat_cx = chip_cx
+            feat_cy = chip_cy + sign * p.prt_cy
+            feat_left = feat_cx - p.prt_width / 2.0
+            feat_bottom = feat_cy - p.prt_height / 2.0
+            
+            # Left bond pad (gold layer)
+            cell.shapes(self.gold_layer_idx).insert(pya.Box(
+                self._um_to_dbu(feat_left),
+                self._um_to_dbu(feat_cy - p.prt_pad_height / 2.0),
+                self._um_to_dbu(feat_left + p.prt_pad_width),
+                self._um_to_dbu(feat_cy + p.prt_pad_height / 2.0)
+            ))
+            
+            # Right bond pad (gold layer)
+            cell.shapes(self.gold_layer_idx).insert(pya.Box(
+                self._um_to_dbu(feat_left + p.prt_width - p.prt_pad_width),
+                self._um_to_dbu(feat_cy - p.prt_pad_height / 2.0),
+                self._um_to_dbu(feat_left + p.prt_width),
+                self._um_to_dbu(feat_cy + p.prt_pad_height / 2.0)
+            ))
+            
+            # Serpentine body (platinum layer)
+            body_left = feat_left + p.prt_pad_width
+            body_right = body_left + body_width
+            
+            for j in range(n_lines):
+                line_bottom = feat_bottom + y_margin + j * pitch
+                line_top = line_bottom + tw
+                
+                # Bottom line touches left pad only; top line touches right pad only;
+                # interior traces are inset by pad_spacing on pad sides
+                if j == 0:
+                    trace_left = body_left
+                    trace_right = body_right - ps
+                elif j == n_lines - 1:
+                    trace_left = body_left + ps
+                    trace_right = body_right
+                else:
+                    trace_left = body_left + ps
+                    trace_right = body_right - ps
+                
+                # Horizontal trace
+                cell.shapes(self.platinum_layer_idx).insert(pya.Box(
+                    self._um_to_dbu(trace_left),
+                    self._um_to_dbu(line_bottom),
+                    self._um_to_dbu(trace_right),
+                    self._um_to_dbu(line_top)
+                ))
+                
+                # Vertical connecting stub to next line
+                if j < n_lines - 1:
+                    next_bottom = line_top + ts
+                    # Even lines connect on right, odd on left
+                    # Stubs are inset by pad_spacing to match shortened traces
+                    if j % 2 == 0:
+                        stub_x = body_right - ps - tw
+                    else:
+                        stub_x = body_left + ps
+                    
+                    cell.shapes(self.platinum_layer_idx).insert(pya.Box(
+                        self._um_to_dbu(stub_x),
+                        self._um_to_dbu(line_top),
+                        self._um_to_dbu(stub_x + tw),
+                        self._um_to_dbu(next_bottom)
+                    ))
+            
+            # Connect first line to left pad, last line to right pad
+            first_line_bottom = feat_bottom + y_margin
+            last_line_bottom = feat_bottom + y_margin + (n_lines - 1) * pitch
+            
+            # Left pad connects to first (bottom) line — Pt trace overlaps Au pad
+            cell.shapes(self.platinum_layer_idx).insert(pya.Box(
+                self._um_to_dbu(body_left - p.prt_pad_width),
+                self._um_to_dbu(first_line_bottom),
+                self._um_to_dbu(body_left),
+                self._um_to_dbu(first_line_bottom + tw)
+            ))
+            
+            # Right pad connects to last line — Pt trace overlaps Au pad
+            if (n_lines - 1) % 2 == 0:
+                cell.shapes(self.platinum_layer_idx).insert(pya.Box(
+                    self._um_to_dbu(body_right),
+                    self._um_to_dbu(last_line_bottom),
+                    self._um_to_dbu(body_right + p.prt_pad_width),
+                    self._um_to_dbu(last_line_bottom + tw)
+                ))
+            else:
+                cell.shapes(self.platinum_layer_idx).insert(pya.Box(
+                    self._um_to_dbu(body_right),
+                    self._um_to_dbu(last_line_bottom),
+                    self._um_to_dbu(body_right + p.prt_pad_width),
+                    self._um_to_dbu(last_line_bottom + tw)
+                ))
     
     # -------------------------------------------------------------------------
-    # SHARED COMPONENTS
+    # LABELS
     # -------------------------------------------------------------------------
     
-    def create_alignment_marks(self, cell: pya.Cell) -> None:
-        """Create alignment marks on both layers."""
-        # TODO: Implement alignment marks
-        pass
+    def create_labels(self, cell: pya.Cell) -> None:
+        """
+        Create polygon-based text labels on the gold layer.
+        
+        Uses KLayout's TextGenerator to render text as bold polygon shapes.
+        Surrounding gold is removed with a clearance margin so text is
+        readable against the cleared substrate.
+        
+        Currently places the omega diameter value at (-1500, +850) from chip center.
+        """
+        chip_cx = self.chip.chip_width / 2.0
+        chip_cy = self.chip.chip_height / 2.0
+        
+        # Omega diameter label
+        omega_diameter = 2.0 * self.gold.omega_center_radius
+        label_x = chip_cx - 2600
+        label_y = chip_cy + 1100.0
+        
+        if self.gold.omega_count == 0:
+            return  # no label for blank chips
+        
+        label_text = f"{omega_diameter:.0f}"
+        
+        # Generate text as polygons using KLayout built-in font
+        gen = pya.TextGenerator.default_generator()
+        target_height = 600.0  # um — character height
+        text_region = gen.text(label_text, self.layout.dbu, target_height)
+        
+        # Thicken for bold appearance
+        bold = self._um_to_dbu(3.0)
+        text_region = text_region.sized(bold)
+        
+        # Move text to desired position
+        text_region.move(self._um_to_dbu(label_x), self._um_to_dbu(label_y))
+        
+        # Clear surrounding gold with margin so text is visible
+        clearance = self._um_to_dbu(30.0)
+        text_bbox = text_region.bbox()
+        clear_box = pya.Region(pya.Box(
+            text_bbox.left - clearance,
+            text_bbox.bottom - clearance,
+            text_bbox.right + clearance,
+            text_bbox.top + clearance
+        ))
+        
+        # Read existing gold, subtract clearance, add text back
+        existing_gold = pya.Region(cell.shapes(self.gold_layer_idx))
+        existing_gold -= clear_box
+        existing_gold += text_region
+        existing_gold.merge()
+        
+        cell.shapes(self.gold_layer_idx).clear()
+        cell.shapes(self.gold_layer_idx).insert(existing_gold)
     
     # -------------------------------------------------------------------------
     # MAIN GENERATION
@@ -756,25 +1366,30 @@ class ChipDesigner:
         cell = self.layout.create_cell(name)
         
         # Gold layer components
-        # 1. Create RF bond pads (returns pad edge positions for taper connections)
-        left_pad_right_x, right_pad_left_x = self.create_rf_bond_pads(cell)
+        # 1. Create RF bond pads with integrated tapers (returns taper end positions)
+        left_taper_end_x, right_taper_start_x = self.create_rf_bond_pads(cell)
         
-        # 2. Create CPW signal path with tapers and omega resonators
-        self.create_cpw_signal_path(cell, left_pad_right_x, right_pad_left_x)
+        # 2. Create CPW signal path sections and omega resonators
+        self.create_cpw_signal_path(cell, left_taper_end_x, right_taper_start_x)
         
-        # 3. DC contacts (TODO)
-        self.create_dc_contacts(cell, self.gold.dc_pad_y_offset)   # Top
-        self.create_dc_contacts(cell, -self.gold.dc_pad_y_offset)  # Bottom
+        # 3. DC access pads (above and below aperture)
+        self.create_dc_access_pads(cell)
         
-        # 4. Ground plane (TODO)
+        # 4. Alignment marks
+        self.create_alignment_marks(cell)
+        
+        # 4b. Vernier alignment marks (imported from external GDS)
+        self.create_vernier_marks(cell)
+        
+        # 5. Ground plane with all cutouts
         self.create_ground_plane(cell)
         
-        # Platinum layer components (TODO)
-        self.create_prt_thermometer(cell, self.platinum.prt_y_offset)   # Top
-        self.create_prt_thermometer(cell, -self.platinum.prt_y_offset)  # Bottom
+        # 6. Labels
+        self.create_labels(cell)
         
-        # Alignment marks (TODO)
-        self.create_alignment_marks(cell)
+        # Platinum layer components
+        # 7. PRT serpentine thermometers
+        self.create_prt_thermometers(cell)
         
         return cell
     
@@ -808,15 +1423,19 @@ class ChipDesigner:
         print(f"  Omega trace width: {self.gold.omega_trace_width:.0f} um")
         print(f"  Omega spacing:     {self.gold.omega_spacing:.0f} um")
         print(f"  Aperture radius:   {self.gold.aperture_radius:.0f} um")
+        print(f"  DC cutout:         {self.gold.dc_cutout_width:.0f} × {self.gold.dc_cutout_height:.0f} um at cy={self.gold.dc_cutout_cy:.0f}")
+        print(f"  DC pads:           {self.gold.dc_pad_count} × {self.gold.dc_pad_width:.0f}×{self.gold.dc_pad_height:.0f} um, pitch={self.gold.dc_pad_pitch:.0f}")
+        print(f"  DC feedline width: {self.gold.dc_feedline_width:.0f} um")
         print()
         
         # Create chip
         print("Creating chip...")
         chip_cell = self.create_chip()
-        print(f"  [OK] RF bond pads (left and right)")
-        print(f"  [OK] CPW signal path with tapers")
+        print("  [OK] RF bond pads (left and right)")
+        print("  [OK] CPW signal path with tapers")
         print(f"  [OK] {self.gold.omega_count} omega resonators")
-        print(f"  [OK] Ground plane with cutouts")
+        print(f"  [OK] DC access pads ({self.gold.dc_pad_count} per side, top and bottom)")
+        print("  [OK] Ground plane with cutouts")
         print()
         
         # Ensure output directory exists

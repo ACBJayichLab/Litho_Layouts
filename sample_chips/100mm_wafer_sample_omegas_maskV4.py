@@ -32,8 +32,18 @@ import klayout.db as pya
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, List, Dict
-from datetime import date
+from typing import Optional, List, Dict
+
+# Import chip designer from the single-chip module
+from importlib.util import spec_from_file_location, module_from_spec
+_chip_spec = spec_from_file_location(
+    "chip_v4",
+    os.path.join(os.path.dirname(__file__), "6x6mm_sample_chip_V4.py")
+)
+_chip_mod = module_from_spec(_chip_spec)
+_chip_spec.loader.exec_module(_chip_mod)
+ChipDesigner = _chip_mod.ChipDesigner
+GoldLayerConfig = _chip_mod.GoldLayerConfig
 
 
 # =============================================================================
@@ -81,39 +91,9 @@ class WaferConfig:
 
 @dataclass
 class ChipConfig:
-    """Per-chip design parameters."""
-    # Chip dimensions
+    """Per-chip dimensions used for array tiling."""
     chip_width: float = 6000.0      # µm
     chip_height: float = 6000.0     # µm
-    
-    # Dicing lane (exposed for gold removal)
-    dicing_margin: float = 100.0    # µm - no gold in this region
-    
-    # RF Bond pads
-    rf_pad_width: float = 400.0     # µm
-    rf_pad_height: float = 800.0    # µm
-    rf_pad_clearance: float = 50.0  # µm from ground plane
-    edge_buffer: float = 200.0      # µm from chip edge to RF pad
-    
-    # CPW transmission line
-    cpw_signal_width: float = 100.0 # µm
-    cpw_gap: float = 50.0           # µm (each side)
-    cpw_taper_length: float = 50.0  # µm
-    
-    # Central aperture (will be overridden per variant)
-    aperture_radius: float = 300.0  # µm
-    
-    # DC contact pads (larger than V3)
-    dc_pad_size: float = 100.0      # µm × µm square
-    dc_pad_spacing: float = 150.0   # µm center-to-center
-    dc_pad_count: int = 8           # number of DC pads per array
-    dc_pad_y_offset: float = 1500.0 # µm from chip center
-    
-    # PRT parameters
-    prt_pad_size: float = 200.0     # µm × µm square (was 125 µm)
-    prt_trace_width: float = 10.0   # µm
-    prt_trace_gap: float = 20.0     # µm centerline-to-centerline
-    prt_y_offset: float = 2000.0    # µm from chip center
 
 
 @dataclass
@@ -128,19 +108,26 @@ class OmegaVariant:
 
 @dataclass
 class ChipVariants:
-    """Collection of chip variants for the mask."""
-    # Default variants: parameter sweep
+    """Collection of chip variants for the mask (3×3 unit cell)."""
+    # 9 variants for 3×3 grid: no_omega, then increasing diameters
+    # Row-major order: bottom-left → bottom-right, middle-left → middle-right, etc.
     variants: List[OmegaVariant] = field(default_factory=lambda: [
-        OmegaVariant("omega_60um",  center_radius=30,  trace_width=10.0, aperture_radius=250),
-        OmegaVariant("omega_100um", center_radius=50,  trace_width=10.0, aperture_radius=300),
-        OmegaVariant("omega_150um", center_radius=75,  trace_width=12.5, aperture_radius=350),
-        OmegaVariant("omega_200um", center_radius=100, trace_width=15.0, aperture_radius=450),
-        OmegaVariant("omega_250um", center_radius=125, trace_width=20.0, aperture_radius=600),
-        OmegaVariant("blank",       center_radius=0,   trace_width=0,    aperture_radius=300),
+        # Bottom row (row 0)
+        OmegaVariant("no_omega",    center_radius=0,    trace_width=0,    aperture_radius=200),
+        OmegaVariant("omega_30um",  center_radius=15,   trace_width=5.0,  aperture_radius=200, trace_gap=7),
+        OmegaVariant("omega_60um",  center_radius=30,   trace_width=7.0,  aperture_radius=250, trace_gap=10),
+        # Middle row (row 1)
+        OmegaVariant("omega_80um",  center_radius=40,   trace_width=8.0,  aperture_radius=280, trace_gap=12.5),
+        OmegaVariant("omega_100um", center_radius=50,   trace_width=8.0, aperture_radius=300, trace_gap=15),
+        OmegaVariant("omega_125um", center_radius=62.5,  trace_width=12, aperture_radius=350, trace_gap=25),
+        # Top row (row 2)
+        OmegaVariant("omega_150um", center_radius=75,   trace_width=12.0, aperture_radius=400, trace_gap=30),
+        OmegaVariant("omega_200um", center_radius=100,  trace_width=12.0, aperture_radius=450, trace_gap=40),
+        OmegaVariant("omega_250um", center_radius=125,  trace_width=15.0, aperture_radius=500, trace_gap=45),
     ])
     
-    # Unit cell arrangement (2 columns × 3 rows)
-    unit_cell_cols: int = 2
+    # Unit cell arrangement (3 columns × 3 rows)
+    unit_cell_cols: int = 3
     unit_cell_rows: int = 3
 
 
@@ -201,24 +188,137 @@ class MaskDesigner:
     # -------------------------------------------------------------------------
     
     def create_chip_cell(self, variant: OmegaVariant) -> pya.Cell:
-        """Create a single chip cell for a given variant."""
-        # TODO: Implement chip cell creation
-        pass
+        """
+        Create a single chip cell for a given omega variant.
+        
+        Uses ChipDesigner from 6x6mm_sample_chip_V4 with overridden omega
+        and aperture parameters. The chip origin is at (0, 0).
+        
+        Args:
+            variant: OmegaVariant with omega radius, trace width, aperture radius
+            
+        Returns:
+            pya.Cell containing the complete chip design
+        """
+        # Build gold config with variant-specific overrides
+        gold_cfg = GoldLayerConfig(
+            omega_center_radius=variant.center_radius,
+            omega_trace_width=variant.trace_width,
+            aperture_radius=variant.aperture_radius,
+            omega_trace_gap=variant.trace_gap,
+        )
+        
+        # For no-omega variant, set omega count to 0
+        if variant.center_radius == 0:
+            gold_cfg.omega_count = 0
+        
+        # Create chip designer sharing this layout's layout object
+        designer = ChipDesigner(
+            gold_config=gold_cfg,
+        )
+        designer.layout = self.layout
+        designer.gold_layer_idx = self.gold_layer_idx
+        designer.platinum_layer_idx = self.platinum_layer_idx
+        
+        # Generate chip cell
+        chip_cell = designer.create_chip(name=variant.name)
+        return chip_cell
     
     def create_unit_cell(self) -> pya.Cell:
-        """Create unit cell containing all chip variants."""
-        # TODO: Implement unit cell
-        pass
+        """
+        Create 3×3 unit cell containing all 9 chip variants.
+        
+        Chips are arranged in a grid centered at (0, 0).
+        Row-major order: variants[0..2] = bottom row, [3..5] = middle, [6..8] = top.
+        
+        Returns:
+            pya.Cell containing 3×3 arrangement of chip variants
+        """
+        unit_cell = self.layout.create_cell("unit_cell_3x3")
+        
+        cw = self.chip.chip_width
+        ch = self.chip.chip_height
+        cols = self.variants.unit_cell_cols
+        rows = self.variants.unit_cell_rows
+        
+        # Total unit cell extent
+        total_w = cols * cw
+        total_h = rows * ch
+        
+        for idx, variant in enumerate(self.variants.variants):
+            col = idx % cols
+            row = idx // cols
+            
+            # Chip lower-left corner (centered about 0,0)
+            x = -total_w / 2.0 + col * cw
+            y = -total_h / 2.0 + row * ch
+            
+            chip_cell = self.create_chip_cell(variant)
+            
+            # Place as cell instance with translation
+            trans = pya.CellInstArray(
+                chip_cell.cell_index(),
+                pya.Trans(pya.Point(self._um_to_dbu(x), self._um_to_dbu(y)))
+            )
+            unit_cell.insert(trans)
+            print(f"    [{col},{row}] {variant.name} (d={2*variant.center_radius:.0f} µm)")
+        
+        return unit_cell
     
     def create_chip_array(self, cell: pya.Cell) -> int:
         """
-        Place chips across usable wafer area.
+        Tile the 3×3 unit cell across a 100 mm × 100 mm area centered at (0, 0).
         
+        The unit cell is repeated in a regular grid. Only complete unit cells
+        that fit within the 100 mm square are placed.
+        
+        Args:
+            cell: Top-level mask cell to insert instances into
+            
         Returns:
-            Number of chips placed
+            Total number of individual chips placed
         """
-        # TODO: Implement chip array placement
-        pass
+        unit_cell = self.create_unit_cell()
+        
+        cw = self.chip.chip_width
+        ch = self.chip.chip_height
+        cols = self.variants.unit_cell_cols
+        rows = self.variants.unit_cell_rows
+        
+        # Unit cell pitch
+        uc_w = cols * cw  # 3 × 6000 = 18000 µm
+        uc_h = rows * ch  # 3 × 6000 = 18000 µm
+        
+        # Array area (100 mm × 100 mm)
+        array_size = 100000.0  # µm
+        
+        # Number of unit cell repetitions in each direction
+        n_x = int(array_size // uc_w)
+        n_y = int(array_size // uc_h)
+        
+        # Centering offset so the array is centered at (0, 0)
+        # Unit cell positions: origin, origin+uc_w, ... origin+(n-1)*uc_w
+        # For symmetry about 0: origin = -(n-1)*uc_w/2
+        origin_x = -((n_x - 1) * uc_w) / 2.0
+        origin_y = -((n_y - 1) * uc_h) / 2.0
+        
+        chip_count = 0
+        for ix in range(n_x):
+            for iy in range(n_y):
+                x = origin_x + ix * uc_w
+                y = origin_y + iy * uc_h
+                
+                trans = pya.CellInstArray(
+                    unit_cell.cell_index(),
+                    pya.Trans(pya.Point(self._um_to_dbu(x), self._um_to_dbu(y)))
+                )
+                cell.insert(trans)
+                chip_count += cols * rows
+        
+        print(f"  Unit cell: {uc_w/1000:.0f} × {uc_h/1000:.0f} mm ({cols}×{rows} chips)")
+        print(f"  Array: {n_x} × {n_y} unit cells = {n_x * n_y} unit cells")
+        
+        return chip_count
     
     # -------------------------------------------------------------------------
     # DICING LANES & ALIGNMENT
@@ -236,14 +336,202 @@ class MaskDesigner:
         pass
     
     def create_alignment_marks(self, cell: pya.Cell) -> None:
-        """Create alignment marks at mask corners and in dicing lanes."""
-        # TODO: Implement alignment marks
-        pass
-    
+        """Create alignment marks at every chip junction in the tiled array.
+        
+        Marks are placed at every intersection of the chip grid lines,
+        including the outermost edges.  This means for an array of
+        n_x × n_y chips there are (n_x+1) × (n_y+1) junction points.
+        
+        Each mark is a simple cross: two perpendicular bars.
+        """
+        cw = self.chip.chip_width
+        ch = self.chip.chip_height
+        cols = self.variants.unit_cell_cols
+        rows = self.variants.unit_cell_rows
+        uc_w = cols * cw
+        uc_h = rows * ch
+
+        array_size = 100000.0
+        n_uc_x = int(array_size // uc_w)
+        n_uc_y = int(array_size // uc_h)
+
+        # Total chips in each direction
+        total_cols = n_uc_x * cols  # 5 × 3 = 15
+        total_rows = n_uc_y * rows  # 5 × 3 = 15
+
+        # Array origin (lower-left chip corner, matching create_chip_array)
+        uc_origin_x = -((n_uc_x - 1) * uc_w) / 2.0
+        uc_origin_y = -((n_uc_y - 1) * uc_h) / 2.0
+        # Unit cell is internally centered, so chips start at -total_uc/2
+        array_left = uc_origin_x - uc_w / 2.0
+        array_bottom = uc_origin_y - uc_h / 2.0
+
+        # Cross dimensions
+        arm_length = 200.0   # µm half-length of each arm
+        arm_width = 20.0     # µm width of each arm
+
+        # Create a reusable cross cell
+        cross_cell = self.layout.create_cell("align_cross")
+        h_bar = pya.Box(
+            self._um_to_dbu(-arm_length), self._um_to_dbu(-arm_width / 2.0),
+            self._um_to_dbu(arm_length),  self._um_to_dbu(arm_width / 2.0),
+        )
+        v_bar = pya.Box(
+            self._um_to_dbu(-arm_width / 2.0), self._um_to_dbu(-arm_length),
+            self._um_to_dbu(arm_width / 2.0),  self._um_to_dbu(arm_length),
+        )
+        cross_cell.shapes(self.gold_layer_idx).insert(h_bar)
+        cross_cell.shapes(self.gold_layer_idx).insert(v_bar)
+
+        mark_count = 0
+        # Junction points: (total_cols + 1) × (total_rows + 1)
+        for ix in range(total_cols + 1):
+            for iy in range(total_rows + 1):
+                x = array_left + ix * cw
+                y = array_bottom + iy * ch
+                trans = pya.CellInstArray(
+                    cross_cell.cell_index(),
+                    pya.Trans(pya.Point(self._um_to_dbu(x), self._um_to_dbu(y)))
+                )
+                cell.insert(trans)
+                mark_count += 1
+
+        print(f"  Placed {mark_count} alignment crosses at chip junctions")
+
+    def _make_wafer_region(self, radius_um: float, flat_depth_um: float,
+                           num_segments: int = 256) -> pya.Region:
+        """Create a circle region with a wafer flat at the bottom.
+        
+        The flat is a horizontal chord at y = -(radius - flat_depth).
+        Built by intersecting a full circle with a clipping box whose
+        bottom edge sits at the flat line.
+        
+        Args:
+            radius_um: Circle radius in µm
+            flat_depth_um: Depth of the flat from the circle edge in µm
+            num_segments: Number of polygon segments for the circle
+            
+        Returns:
+            pya.Region of the circle with flat
+        """
+        # Full circle
+        pts = []
+        for i in range(num_segments):
+            angle = 2.0 * math.pi * i / num_segments
+            pts.append(pya.Point(
+                self._um_to_dbu(radius_um * math.cos(angle)),
+                self._um_to_dbu(radius_um * math.sin(angle)),
+            ))
+        circle_region = pya.Region(pya.Polygon(pts))
+        
+        # Clip box: everything above the flat line
+        flat_y = -(radius_um - flat_depth_um)
+        margin = radius_um + 1000.0  # generous overshoot
+        clip_box = pya.Box(
+            self._um_to_dbu(-margin),
+            self._um_to_dbu(flat_y),
+            self._um_to_dbu(margin),
+            self._um_to_dbu(margin),
+        )
+        return circle_region & pya.Region(clip_box)
+
+    def clip_to_radius(self, cell: pya.Cell, radius_um: float) -> None:
+        """Clip all gold and platinum features to a wafer-shaped region.
+        
+        Uses a circle of the given radius with a standard wafer flat at
+        the bottom.  Iterates through the cell hierarchy using
+        RecursiveShapeIterator, boolean-ANDs each layer with the clip
+        shape, clears the cell, and re-inserts the clipped geometry.
+        
+        Args:
+            cell: Top-level cell to clip
+            radius_um: Clip circle radius in µm
+        """
+        clip_region = self._make_wafer_region(
+            radius_um, self.wafer.wafer_flat_depth)
+        
+        # Clip each active layer by gathering all shapes recursively
+        layers_to_clip = [self.gold_layer_idx, self.platinum_layer_idx]
+        clipped_regions = {}
+        for layer_idx in layers_to_clip:
+            layer_region = pya.Region(cell.begin_shapes_rec(layer_idx))
+            clipped_regions[layer_idx] = layer_region & clip_region
+        
+        # Clear all instances and shapes, then re-insert clipped geometry
+        cell.clear()
+        for layer_idx, region in clipped_regions.items():
+            cell.shapes(layer_idx).insert(region)
+
+    def create_gold_ring(self, cell: pya.Cell) -> None:
+        """Create a gold annular ring with wafer flat (96–101 mm diameter).
+        
+        Both the inner and outer boundaries include a standard wafer flat
+        at the bottom, matching the clip shape.  The flat depth is taken
+        from WaferConfig so all wafer-shaped features are consistent.
+        """
+        inner_r = 96000.0 / 2   # µm  (48 mm radius)
+        outer_r = 101000.0 / 2  # µm  (50.5 mm radius)
+        flat_depth = self.wafer.wafer_flat_depth  # 2500 µm
+        
+        outer_shape = self._make_wafer_region(outer_r, flat_depth)
+        inner_shape = self._make_wafer_region(inner_r, flat_depth)
+        
+        ring_region = outer_shape - inner_shape
+        cell.shapes(self.gold_layer_idx).insert(ring_region)
+
     def create_mask_labels(self, cell: pya.Cell) -> None:
-        """Create text labels for mask identification."""
-        # TODO: Implement mask labels
-        pass
+        """Create text labels for mask identification on both layers.
+        
+        Gold layer text:
+            6x6 Sample Chips V4
+            Gold Electroplating Mask
+            Negative PR
+            Layer 1 of 2
+            
+        Platinum layer text:
+            6x6 Sample Chips V4
+            Pt Thermometer
+            Positive PR
+            Layer 2 of 2
+            
+        Placed at (-32500, -32500) µm  (i.e. x,y = -65/2 mm).
+        """
+        gen = pya.TextGenerator.default_generator()
+        target_height = 500.0   # µm character height
+        line_spacing = 700.0    # µm between baselines
+        bold_size = 3.0         # µm sizing for bold
+        dbu = self.layout.dbu
+
+        # Anchor position: -65/2 mm = -32500 µm
+        anchor_x = -32500.0
+        anchor_y = -32500.0
+
+        def _place_text_block(lines: list[str], layer_idx: int) -> None:
+            """Render multi-line text block as bold polygons."""
+            for i, line in enumerate(lines):
+                y_offset = anchor_y - i * line_spacing
+                text_region = gen.text(line, dbu, target_height)
+                text_region = text_region.sized(int(bold_size / dbu))
+                text_region.move(int(anchor_x / dbu), int(y_offset / dbu))
+                cell.shapes(layer_idx).insert(text_region)
+
+        # Gold layer labels
+        gold_lines = [
+            "6x6 Sample Chips V4",
+            "Gold Electroplating Mask",
+            "Negative PR",
+            "Layer 1 of 2",
+        ]
+        _place_text_block(gold_lines, self.gold_layer_idx)
+
+        # Platinum layer labels
+        pt_lines = [
+            "6x6 Sample Chips V4",
+            "Pt Thermometer",
+            "Positive PR",
+            "Layer 2 of 2",
+        ]
+        _place_text_block(pt_lines, self.platinum_layer_idx)
     
     # -------------------------------------------------------------------------
     # OUTPUT GENERATION
@@ -309,13 +597,22 @@ class MaskDesigner:
         self.create_alignment_marks(mask_cell)
         self.create_mask_labels(mask_cell)
         
+        # Clip all features to 96 mm radius (flattens the cell)
+        print("Clipping features to 96 mm radius...")
+        self.clip_to_radius(mask_cell, 96000.0/2)
+
+        
+        # Add gold ring AFTER clipping so it is not clipped
+        print("Creating gold ring (96–101 mm)...")
+        self.create_gold_ring(mask_cell)
+        
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
         
         # Export files
         output_files = {}
         
-        # Hierarchical (inspect) GDS
+        # Inspect GDS (already flattened by clip_to_radius)
         inspect_path = os.path.join(output_dir, "100mm_wafer_sample_omegas_maskV4_inspect.gds")
         self.layout.write(inspect_path)
         output_files["inspect"] = inspect_path
@@ -333,9 +630,8 @@ class MaskDesigner:
             output_files["map"] = map_path
             print(f"✓ Layer map: {map_path}")
         
-        # Flattened (prod) GDS
+        # Production GDS (cell is already flat from clip step)
         prod_path = os.path.join(output_dir, "100mm_wafer_sample_omegas_maskV4_prod.gds")
-        mask_cell.flatten(True)
         self.layout.write(prod_path)
         output_files["prod"] = prod_path
         print(f"✓ Production design: {prod_path}")
