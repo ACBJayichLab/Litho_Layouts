@@ -647,6 +647,43 @@ class MaskDesigner:
         # Clip shape = rectangle AND circle
         clip_shape = rect & circle
         
+        # Add small boxes around outermost alignment marks so they are
+        # fully contained in the inversion region.  Marks sit at chip
+        # junctions on the rectangle boundary; their 200 µm arms extend
+        # outside the rect, causing partial inversion.  We add a box
+        # at each boundary mark large enough to cover the full cross
+        # (arm_length=200, arm_width=20 → use 250 µm half-size envelope).
+        mark_half = 250.0  # µm — slightly larger than cross arm half-length
+        
+        # Collect all boundary junction positions (edges of the rect)
+        boundary_marks = []
+        for ix in range(total_cols + 1):
+            x = array_left + ix * cw
+            # Top edge
+            boundary_marks.append((x, array_top))
+            # Bottom edge (effective)
+            boundary_marks.append((x, effective_bottom))
+        for iy in range(total_rows + 1):
+            y = array_bottom + iy * ch
+            if y < effective_bottom:
+                continue  # skip removed bottom row marks
+            # Left edge
+            boundary_marks.append((array_left, y))
+            # Right edge
+            boundary_marks.append((array_right, y))
+        
+        for mx, my in boundary_marks:
+            mark_box = pya.Region(pya.Box(
+                self._um_to_dbu(mx - mark_half),
+                self._um_to_dbu(my - mark_half),
+                self._um_to_dbu(mx + mark_half),
+                self._um_to_dbu(my + mark_half),
+            ))
+            # AND with wafer circle so we don't extend past the wafer
+            clip_shape += mark_box & circle
+        
+        clip_shape.merge()
+        
         # Invert gold: new = clip_shape - existing_gold
         existing_gold = pya.Region(cell.shapes(self.gold_layer_idx))
         inverted_gold = clip_shape - existing_gold
