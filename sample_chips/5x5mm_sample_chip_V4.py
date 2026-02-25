@@ -61,7 +61,7 @@ class ChipConfig:
     chip_height: float = 5000.0     # um
     
     # Dicing margins (exposed for gold removal)
-    dicing_margin: float = 125.0    # um - no gold in this region
+    dicing_margin: float = 150.0    # um - no gold in this region
     
     # Database unit
     dbu: float = 0.001              # um per database unit
@@ -72,7 +72,7 @@ class GoldLayerConfig:
     """Gold layer (1/0) design parameters - CPW, ground, DC contacts."""
     # RF Bond pads
     rf_pad_width: float = 800.0     # um (in Y direction)
-    rf_pad_height: float = 600.0    # um (in X direction, along CPW)
+    rf_pad_height: float = 800.0    # um (in X direction, along CPW)
     rf_pad_clearance: float = 50.0  # um from ground plane
     
     # CPW transmission line
@@ -97,14 +97,14 @@ class GoldLayerConfig:
     # All Y offsets are from chip center; geometry is mirrored to both sides.
     #
     # --- Cutout rectangle (ground plane opening) ---
-    dc_cutout_cy: float = 1500.0        # um from chip center to cutout center Y
+    dc_cutout_cy: float = 1400.0        # um from chip center to cutout center Y
     dc_cutout_width: float = 2100.0     # um
     dc_cutout_height: float = 500.0     # um
     dc_cutout_aperture_width: float = 50.0  # um width where cutout goes vertical
     dc_cutout_taper_angle: float = 50.0      # degrees from vertical for cutout taper
     
     # --- DC bond pads ---
-    dc_pad_cy: float = 1500.0          # um from chip center to innermost pad center Y
+    dc_pad_cy: float = 1400.0          # um from chip center to innermost pad center Y
     dc_pad_width: float = 250.0        # um
     dc_pad_height: float = 250.0       # um
     dc_pad_count: int = 6              # pads per side
@@ -132,25 +132,25 @@ class GoldLayerConfig:
     alignment_mark_width: float = 20.0      # um cross arm trace width
     
     # Edge buffer for RF pads
-    edge_buffer: float = 400.0      # um from chip edge to pad
+    edge_buffer: float = 200.0      # um from chip edge to pad
 
 
 @dataclass
 class PlatinumConfig:
     """Platinum layer (2/0) design parameters - PRT thermometer."""
     # Overall feature dimensions
-    prt_width: float = 4000.0       # um total length (X)
+    prt_width: float = 4600.0       # um total length (X)
     prt_height: float = 420.0       # um total height (Y)
-    prt_cy: float = 2000.0          # um from chip center (placed at ±cy)
+    prt_cy: float = 2100.0          # um from chip center (placed at ±cy)
     
     # Bond pads at each end
-    prt_pad_width: float = 500.0    # um (X extent)
+    prt_pad_width: float = 700.0    # um (X extent)
     prt_pad_height: float = prt_height   # um (Y extent, matches prt_height)
     
     # Serpentine trace
     prt_trace_width: float = 8.0   # um line width
     prt_trace_spacing: float = 10.0 # um gap between lines
-    prt_pad_spacing: float = 20.0   # um gap between Au bond pad and Pt serpentine
+    prt_pad_spacing: float = 50.0   # um gap between Au bond pad and Pt serpentine
 
 
 # =============================================================================
@@ -1072,8 +1072,8 @@ class ChipDesigner:
         
         # === SUBTRACT VERNIER ALIGNMENT MARK CLEARANCE ===
         vernier_clr = 50.0  # µm clearance around vernier marks
-        vx = chip_cx + 2200.0
-        vy = chip_cy + 1000.0
+        vx = chip_cx + 2100.0
+        vy = chip_cy + 1400.0
         # Vernier combined bbox (from imported GDS): ~340 × 275 µm centered at mark origin
         v_hw = 170.0  # half-width
         v_hh = 170.0  # half-height (use symmetric envelope)
@@ -1157,8 +1157,8 @@ class ChipDesigner:
         # Placement position (chip-local coordinates)
         chip_cx = self.chip.chip_width / 2.0
         chip_cy = self.chip.chip_height / 2.0
-        vx = chip_cx + 2200.0
-        vy = chip_cy + 1000.0
+        vx = chip_cx + 2100.0
+        vy = chip_cy + 1400.0
         
         # Translate to placement position and insert
         shift = pya.ICplxTrans(1, 0, False,

@@ -38,7 +38,7 @@ from typing import Optional, List, Dict
 from importlib.util import spec_from_file_location, module_from_spec
 _chip_spec = spec_from_file_location(
     "chip_v4",
-    os.path.join(os.path.dirname(__file__), "6x6mm_sample_chip_V4.py")
+    os.path.join(os.path.dirname(__file__), "5x5mm_sample_chip_V4.py")
 )
 _chip_mod = module_from_spec(_chip_spec)
 _chip_spec.loader.exec_module(_chip_mod)
@@ -92,8 +92,8 @@ class WaferConfig:
 @dataclass
 class ChipConfig:
     """Per-chip dimensions used for array tiling."""
-    chip_width: float = 6000.0      # µm
-    chip_height: float = 6000.0     # µm
+    chip_width: float = 5000.0      # µm
+    chip_height: float = 5000.0     # µm
 
 
 @dataclass
@@ -286,8 +286,8 @@ class MaskDesigner:
         rows = self.variants.unit_cell_rows
         
         # Unit cell pitch
-        uc_w = cols * cw  # 3 × 6000 = 18000 µm
-        uc_h = rows * ch  # 3 × 6000 = 18000 µm
+        uc_w = cols * cw  # 3 × 5000 = 15000 µm
+        uc_h = rows * ch  # 3 × 5000 = 15000 µm
         
         # Array area (100 mm × 100 mm)
         array_size = 100000.0  # µm
@@ -482,31 +482,32 @@ class MaskDesigner:
     def create_mask_labels(self, cell: pya.Cell) -> None:
         """Create text labels for mask identification on both layers.
         
-        Gold layer text:
-            6x6 Sample Chips V4
+        Labels are placed outside the wafer clip area on the mask plate
+        so they don't merge with chip geometry.
+        
+        Gold layer text (bottom-left):
+            5x5 Sample Chips V4
             Gold Electroplating Mask
             Negative PR
             Layer 1 of 2
             
-        Platinum layer text:
-            6x6 Sample Chips V4
+        Platinum layer text (bottom-right):
+            5x5 Sample Chips V4
             Pt Thermometer
             Positive PR
             Layer 2 of 2
-            
-        Placed at (-32500, -32500) µm  (i.e. x,y = -65/2 mm).
+        
+        Gold labels placed bottom-left, platinum labels bottom-right,
+        both outside the wafer clip area but on the mask plate.
         """
         gen = pya.TextGenerator.default_generator()
-        target_height = 500.0   # µm character height
-        line_spacing = 700.0    # µm between baselines
-        bold_size = 3.0         # µm sizing for bold
+        target_height = 1100.0   # µm character height
+        line_spacing = 1000.0    # µm between baselines
+        bold_size = 8.0         # µm sizing for bold
         dbu = self.layout.dbu
 
-        # Anchor position: -65/2 mm = -32500 µm
-        anchor_x = -32500.0
-        anchor_y = -32500.0
-
-        def _place_text_block(lines: list[str], layer_idx: int) -> None:
+        def _place_text_block(lines: list[str], layer_idx: int,
+                              anchor_x: float, anchor_y: float) -> None:
             """Render multi-line text block as bold polygons."""
             for i, line in enumerate(lines):
                 y_offset = anchor_y - i * line_spacing
@@ -515,23 +516,25 @@ class MaskDesigner:
                 text_region.move(int(anchor_x / dbu), int(y_offset / dbu))
                 cell.shapes(layer_idx).insert(text_region)
 
-        # Gold layer labels
+        # Gold layer labels (bottom-left, outside wafer area)
         gold_lines = [
-            "6x6 Sample Chips V4",
+            "5x5 Sample Chips V4",
             "Gold Electroplating Mask",
             "Negative PR",
             "Layer 1 of 2",
         ]
-        _place_text_block(gold_lines, self.gold_layer_idx)
+        _place_text_block(gold_lines, self.gold_layer_idx,
+                          anchor_x=-23000, anchor_y=52000.0)
 
-        # Platinum layer labels
+        # Platinum layer labels (bottom-right, outside wafer area)
         pt_lines = [
-            "6x6 Sample Chips V4",
+            "5x5 Sample Chips V4",
             "Pt Thermometer",
             "Positive PR",
             "Layer 2 of 2",
         ]
-        _place_text_block(pt_lines, self.platinum_layer_idx)
+        _place_text_block(pt_lines, self.platinum_layer_idx,
+                          anchor_x=22000.0, anchor_y=52000.0)
     
     # -------------------------------------------------------------------------
     # OUTPUT GENERATION
@@ -595,16 +598,18 @@ class MaskDesigner:
         print("Creating dicing lanes and alignment marks...")
         self.create_dicing_lanes(mask_cell)
         self.create_alignment_marks(mask_cell)
-        self.create_mask_labels(mask_cell)
         
         # Clip all features to 96 mm radius (flattens the cell)
         print("Clipping features to 96 mm radius...")
         self.clip_to_radius(mask_cell, 96000.0/2)
-
         
         # Add gold ring AFTER clipping so it is not clipped
         print("Creating gold ring (96–101 mm)...")
         self.create_gold_ring(mask_cell)
+        
+        # Add labels AFTER clipping so they aren't merged into chip geometry
+        print("Creating mask labels...")
+        self.create_mask_labels(mask_cell)
         
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
