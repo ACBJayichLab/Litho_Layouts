@@ -174,9 +174,81 @@ class MaskDesigner:
     # -------------------------------------------------------------------------
     
     def create_wafer_outline(self, cell: pya.Cell) -> None:
-        """Create wafer outline with flat for alignment reference."""
-        # TODO: Implement wafer outline
-        pass
+        """Create a dashed-line wafer outline on the gold layer.
+        
+        Traces the perimeter of a 100 mm wafer (with standard flat)
+        using short rectangular dashes.  The outline is purely a visual
+        reference — it does not affect chip geometry.
+        
+        Parameters are derived from WaferConfig (diameter, flat depth).
+        Dash/gap/width are hard-coded here for a clear visual.
+        """
+        radius = self.wafer.wafer_diameter / 2.0  # 50000 µm
+        flat_depth = self.wafer.wafer_flat_depth   # 2500 µm
+        
+        dash_length = 500.0   # µm along the path
+        gap_length = 300.0    # µm between dashes
+        dash_width = 20.0     # µm perpendicular to path
+        
+        # --- Circular arc portion ---
+        # The flat chord sits at y = -(radius - flat_depth).
+        # The arc spans everything above that line.
+        flat_y = -(radius - flat_depth)
+        # Angle where circle intersects the flat line:
+        #   y = -r * sin(theta) = flat_y  =>  cos(alpha) = (r - flat_depth) / r
+        #   where alpha is the half-angle from the -Y axis to the flat endpoint
+        flat_half_angle = math.acos((radius - flat_depth) / radius)
+        # Arc runs from (-pi/2 + flat_half_angle) around to (-pi/2 - flat_half_angle + 2pi)
+        arc_start = -math.pi / 2 + flat_half_angle
+        arc_end = arc_start + 2 * math.pi - 2 * flat_half_angle
+        
+        arc_length = radius * (arc_end - arc_start)
+        stride = dash_length + gap_length
+        n_arc_dashes = int(arc_length / stride)
+        
+        hw = dash_width / 2.0  # half-width
+        
+        for i in range(n_arc_dashes):
+            # Center of dash along the arc
+            s_center = i * stride + dash_length / 2.0
+            angle_center = arc_start + s_center / radius
+            
+            # Dash start/end angles
+            s0 = i * stride
+            s1 = s0 + dash_length
+            a0 = arc_start + s0 / radius
+            a1 = arc_start + s1 / radius
+            
+            # Build a 4-point polygon: inner/outer edges at start/end
+            # Tangent is perpendicular to radius; outward normal is radial
+            pts = []
+            for a, sign in [(a0, -1), (a0, +1), (a1, +1), (a1, -1)]:
+                r_off = radius + sign * hw
+                x = r_off * math.cos(a)
+                y = r_off * math.sin(a)
+                pts.append(pya.Point(self._um_to_dbu(x), self._um_to_dbu(y)))
+            cell.shapes(self.gold_layer_idx).insert(pya.Polygon(pts))
+        
+        # --- Flat (bottom straight line) ---
+        # Flat runs from x_left to x_right at y = flat_y
+        x_flat = math.sqrt(radius**2 - (radius - flat_depth)**2)
+        flat_total = 2 * x_flat
+        n_flat_dashes = int(flat_total / stride)
+        flat_start_x = -x_flat
+        
+        for i in range(n_flat_dashes):
+            x0 = flat_start_x + i * stride
+            x1 = x0 + dash_length
+            if x1 > x_flat:
+                x1 = x_flat
+            cell.shapes(self.gold_layer_idx).insert(pya.Box(
+                self._um_to_dbu(x0),
+                self._um_to_dbu(flat_y - hw),
+                self._um_to_dbu(x1),
+                self._um_to_dbu(flat_y + hw),
+            ))
+        
+        print("  [OK] Wafer outline (dashed, 100 mm with flat)")
     
     def create_mask_plate_outline(self, cell: pya.Cell) -> None:
         """Create 5"×5" mask plate border."""
@@ -462,6 +534,49 @@ class MaskDesigner:
         for layer_idx, region in clipped_regions.items():
             cell.shapes(layer_idx).insert(region)
 
+    def mask_bottom_chip_row(self, cell: pya.Cell) -> None:
+        """Remove the bottommost row of chips from both layers.
+        
+        The chip array is centered at (0, 0). This computes the top edge
+        of the bottommost chip row and subtracts everything below it
+        from both gold and platinum layers.
+        """
+        cw = self.chip.chip_width
+        ch = self.chip.chip_height
+        cols = self.variants.unit_cell_cols
+        rows = self.variants.unit_cell_rows
+        uc_w = cols * cw
+        uc_h = rows * ch
+        
+        array_size = 100000.0
+        n_uc_y = int(array_size // uc_h)
+        
+        # Array bottom edge (same calculation as create_chip_array / create_alignment_marks)
+        uc_origin_y = -((n_uc_y - 1) * uc_h) / 2.0
+        array_bottom = uc_origin_y - uc_h / 2.0
+        
+        # Top edge of bottommost chip row
+        cut_y = array_bottom + ch
+        
+        # Large box covering everything below cut_y
+        margin = 60000.0  # generous X extent
+        cut_box = pya.Region(pya.Box(
+            self._um_to_dbu(-margin),
+            self._um_to_dbu(array_bottom - 10000.0),
+            self._um_to_dbu(margin),
+            self._um_to_dbu(cut_y),
+        ))
+        
+        for layer_idx in [self.gold_layer_idx, self.platinum_layer_idx]:
+            layer_region = pya.Region(cell.shapes(layer_idx))
+            layer_region -= cut_box
+            cell.shapes(layer_idx).clear()
+            cell.shapes(layer_idx).insert(layer_region)
+        
+        n_uc_x = int(array_size // uc_w)
+        removed = n_uc_x * cols  # one chip row across full width
+        print(f"  Masked out bottom chip row (y < {cut_y:.0f} µm, {removed} chips)")
+
     def create_gold_ring(self, cell: pya.Cell) -> None:
         """Create a gold annular ring with wafer flat (96–101 mm diameter).
         
@@ -478,6 +593,69 @@ class MaskDesigner:
         
         ring_region = outer_shape - inner_shape
         cell.shapes(self.gold_layer_idx).insert(ring_region)
+
+    def invert_gold_polarity(self, cell: pya.Cell) -> None:
+        """Invert the gold layer polarity within the usable mask area.
+        
+        Builds a clip shape as the AND of:
+          1. A rectangle whose sides coincide with the outermost dicing
+             alignment marks. The bottom edge uses the post-removal boundary
+             (top of the removed bottom chip row) rather than the original
+             array bottom.
+          2. A 96 mm diameter circle with standard wafer flat.
+        
+        Then inverts the gold layer: new_gold = clip_shape - old_gold.
+        This flips the polarity so that what was gold becomes exposed and
+        what was exposed becomes gold.
+        """
+        cw = self.chip.chip_width
+        ch = self.chip.chip_height
+        cols = self.variants.unit_cell_cols
+        rows = self.variants.unit_cell_rows
+        uc_w = cols * cw
+        uc_h = rows * ch
+        
+        array_size = 100000.0
+        n_uc_x = int(array_size // uc_w)
+        n_uc_y = int(array_size // uc_h)
+        
+        # Outermost alignment mark positions
+        uc_origin_x = -((n_uc_x - 1) * uc_w) / 2.0
+        uc_origin_y = -((n_uc_y - 1) * uc_h) / 2.0
+        array_left = uc_origin_x - uc_w / 2.0
+        array_bottom = uc_origin_y - uc_h / 2.0
+        
+        total_cols = n_uc_x * cols
+        total_rows = n_uc_y * rows
+        array_right = array_left + total_cols * cw
+        array_top = array_bottom + total_rows * ch
+        
+        # Bottom edge: account for removed bottom chip row
+        effective_bottom = array_bottom + ch
+        
+        # Rectangle aligned to outermost alignment marks
+        rect = pya.Region(pya.Box(
+            self._um_to_dbu(array_left),
+            self._um_to_dbu(effective_bottom),
+            self._um_to_dbu(array_right),
+            self._um_to_dbu(array_top),
+        ))
+        
+        # 96 mm diameter circle with wafer flat
+        circle = self._make_wafer_region(96000.0 / 2, self.wafer.wafer_flat_depth)
+        
+        # Clip shape = rectangle AND circle
+        clip_shape = rect & circle
+        
+        # Invert gold: new = clip_shape - existing_gold
+        existing_gold = pya.Region(cell.shapes(self.gold_layer_idx))
+        inverted_gold = clip_shape - existing_gold
+        
+        cell.shapes(self.gold_layer_idx).clear()
+        cell.shapes(self.gold_layer_idx).insert(inverted_gold)
+        
+        print(f"  Inversion rectangle: [{array_left:.0f}, {effective_bottom:.0f}] to [{array_right:.0f}, {array_top:.0f}] µm")
+        print(f"  AND with 96 mm wafer circle")
 
     def create_mask_labels(self, cell: pya.Cell) -> None:
         """Create text labels for mask identification on both layers.
@@ -589,7 +767,6 @@ class MaskDesigner:
         # Build mask components
         print("Creating mask layout...")
         self.create_mask_plate_outline(mask_cell)
-        self.create_wafer_outline(mask_cell)
         
         print("Creating chip array...")
         chip_count = self.create_chip_array(mask_cell)
@@ -603,13 +780,21 @@ class MaskDesigner:
         print("Clipping features to 96 mm radius...")
         self.clip_to_radius(mask_cell, 96000.0/2)
         
-        # Add gold ring AFTER clipping so it is not clipped
-        print("Creating gold ring (96–101 mm)...")
-        self.create_gold_ring(mask_cell)
+        # Remove bottommost chip row (partially cut by wafer flat)
+        print("Masking bottom chip row...")
+        self.mask_bottom_chip_row(mask_cell)
         
-        # Add labels AFTER clipping so they aren't merged into chip geometry
+        # Invert gold polarity within usable area
+        print("Inverting gold layer polarity...")
+        self.invert_gold_polarity(mask_cell)
+        
+        # Add labels AFTER inversion so they aren't affected
         print("Creating mask labels...")
         self.create_mask_labels(mask_cell)
+        
+        # Wafer outline dashed line (after inversion so dashes stay as-is)
+        print("Creating wafer outline...")
+        self.create_wafer_outline(mask_cell)
         
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
