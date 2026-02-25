@@ -1054,6 +1054,21 @@ class ChipDesigner:
                     self._um_to_dbu(my + am_size / 2.0 + am_clr)
                 ))
         
+        # === SUBTRACT SMALL ALIGNMENT MARK CLEARANCES ===
+        small_am_offset = 400.0
+        small_am_half = 7.5
+        small_am_clr = 30.0  # µm clearance around small marks
+        for sx in [+1, -1]:
+            for sy in [+1, -1]:
+                smx = chip_cx + sx * small_am_offset
+                smy = chip_cy + sy * small_am_offset
+                ground_region -= pya.Region(pya.Box(
+                    self._um_to_dbu(smx - small_am_half - small_am_clr),
+                    self._um_to_dbu(smy - small_am_half - small_am_clr),
+                    self._um_to_dbu(smx + small_am_half + small_am_clr),
+                    self._um_to_dbu(smy + small_am_half + small_am_clr)
+                ))
+        
         # === SUBTRACT PRT THERMOMETER CLEARANCES ===
         # Inner edge (toward chip center) has normal clearance;
         # outer edge (toward chip boundary) extends to chip edge (no ground).
@@ -1121,6 +1136,39 @@ class ChipDesigner:
                     self._um_to_dbu(cy + size / 2.0)
                 ))
     
+    def create_small_alignment_marks(self, cell: pya.Cell) -> None:
+        """Create small cross alignment marks at ±800, ±800 µm from chip center.
+        
+        Each mark is 15 µm overall (arm half-length = 7.5 µm) with 5 µm trace width.
+        Placed on the gold layer at 4 positions near the chip center.
+        """
+        chip_cx = self.chip.chip_width / 2.0
+        chip_cy = self.chip.chip_height / 2.0
+        offset = 400.0       # µm from center
+        arm_half = 25       # µm (15 µm overall / 2)
+        tw = 4.0             # µm trace width
+        
+        for sx in [+1, -1]:
+            for sy in [+1, -1]:
+                cx = chip_cx + sx * offset
+                cy = chip_cy + sy * offset
+                
+                # Horizontal bar
+                cell.shapes(self.gold_layer_idx).insert(pya.Box(
+                    self._um_to_dbu(cx - arm_half),
+                    self._um_to_dbu(cy - tw / 2.0),
+                    self._um_to_dbu(cx + arm_half),
+                    self._um_to_dbu(cy + tw / 2.0)
+                ))
+                
+                # Vertical bar
+                cell.shapes(self.gold_layer_idx).insert(pya.Box(
+                    self._um_to_dbu(cx - tw / 2.0),
+                    self._um_to_dbu(cy - arm_half),
+                    self._um_to_dbu(cx + tw / 2.0),
+                    self._um_to_dbu(cy + arm_half)
+                ))
+
     def create_vernier_marks(self, cell: pya.Cell) -> None:
         """Import vernier/alignment marks from external GDS onto each chip.
         
@@ -1313,7 +1361,7 @@ class ChipDesigner:
         # Omega diameter label
         omega_diameter = 2.0 * self.gold.omega_center_radius
         label_x = chip_cx - 2100
-        label_y = chip_cy + 600.0
+        label_y = chip_cy + 800.0
         
         if self.gold.omega_count == 0:
             return  # no label for blank chips
@@ -1322,7 +1370,7 @@ class ChipDesigner:
         
         # Generate text as polygons using KLayout built-in font
         gen = pya.TextGenerator.default_generator()
-        target_height = 600.0  # um — character height
+        target_height = 400.0  # um — character height
         text_region = gen.text(label_text, self.layout.dbu, target_height)
         
         # Thicken for bold appearance
@@ -1379,6 +1427,9 @@ class ChipDesigner:
         
         # 4. Alignment marks
         self.create_alignment_marks(cell)
+        
+        # 4a. Small alignment marks near center
+        self.create_small_alignment_marks(cell)
         
         # 4b. Vernier alignment marks (imported from external GDS)
         self.create_vernier_marks(cell)
